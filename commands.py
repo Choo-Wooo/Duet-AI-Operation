@@ -41,7 +41,7 @@ def _fmt_status(orch: Orchestrator) -> str:
     mt = "∞" if s["max_turns"] is None else s["max_turns"]
     return (f"모드 {s['mode']} · 턴 {s['run_turns']}/{mt} · 자동위임 {'on' if s['auto'] else 'off'} · "
             f"{'일시정지 · ' if s['paused'] else ''}실행 중 {s['running'] or '-'} · "
-            f"비용 ${s['cost_usd']:.2f} · 토큰 {s['tokens']:,}" +
+            f"Claude API 환산 ${s['cost_usd']:.2f} (구독이면 실제 청구 아님) · 토큰 {s['tokens']:,}" +
             (f"\n{s['task_summary']}" if s.get("task") else ""))
 
 

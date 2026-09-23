@@ -66,6 +66,9 @@ def setup_project(duet_dir: Path, project: Path, fake: bool) -> tuple[Config, li
                 if len(seen) > 1:
                     others = ", ".join(f"{p} [{v}]" for p, v in seen if p != path)
                     msgs.append(f"  {c} 가 여러 곳에 있어 가장 최신 버전을 씁니다. 다른 설치본: {others}")
+        from .core.accounts import check_accounts
+        print("[duet] CLI 로그인 계정을 확인하는 중…", flush=True)
+        msgs.extend(check_accounts([c for c in used if c in clis]))
     git = Git(project, bool(cfg.settings.get("git_snapshots", True)))
     m = git.ensure_repo()
     if m:

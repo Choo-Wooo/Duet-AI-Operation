@@ -224,7 +224,7 @@ class DuetApp(App):
                  f" · 자동위임 {'on' if s.get('auto') else 'off'}")
         pa = s.get("pending_approvals", 0)
         t.append(f" · 승인 대기 {pa}", style="bold red" if pa else "")
-        t.append(f" · ${s.get('cost_usd', 0):.2f} · {s.get('tokens', 0):,} tok · {el // 60}m{el % 60:02d}s")
+        t.append(f" · API환산 ${s.get('cost_usd', 0):.2f} · {s.get('tokens', 0):,} tok · {el // 60}m{el % 60:02d}s")
         t.append("   ^X 중단 ^Q 종료", style="dim")
         if s.get("task"):
             t.append(" · " + s["task_summary"], style="cyan")
