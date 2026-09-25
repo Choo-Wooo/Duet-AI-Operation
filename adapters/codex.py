@@ -14,7 +14,7 @@ from .. import __version__
 from ..core.clis import which
 from ..core.policy import ApprovalRequest, Decision
 from ..core.prompts import REVIEW_SYSTEM
-from .base import AgentAdapter, TurnResult, clip
+from .base import AgentAdapter, TurnResult, clip, is_context_overflow
 
 
 class RpcError(Exception):
@@ -25,6 +25,7 @@ class RpcError(Exception):
 
 class CodexAdapter(AgentAdapter):
     proc: asyncio.subprocess.Process | None = None
+    _compact_fut: asyncio.Future | None = None
 
     async def start(self) -> None:
         exe = which("codex")
@@ -38,6 +39,7 @@ class CodexAdapter(AgentAdapter):
         self._texts: list[str] = []
         self._tokens_total = 0
         self._tokens_now = 0
+        self._compact_fut: asyncio.Future | None = None
         self._stderr: deque[str] = deque(maxlen=30)
         self._closed = False
         self.proc = await asyncio.create_subprocess_exec(
@@ -86,6 +88,9 @@ class CodexAdapter(AgentAdapter):
         }
         if self.role.model:
             p["model"] = self.role.model
+        if self.context_limit:
+            # 턴 도중에도 이 크기를 넘으면 Codex 가 스스로 자동 압축한다
+            p["config"] = {"model_auto_compact_token_limit": int(self.context_limit)}
         return p
 
     # ---------------- JSON-RPC ----------------
@@ -173,9 +178,16 @@ class CodexAdapter(AgentAdapter):
             elif t == "fileChange":
                 self.emit("tool_output", text=f"patch {item.get('status')}", ok=item.get("status") != "failed")
         elif method == "thread/tokenUsage/updated":
-            total = ((p.get("tokenUsage") or {}).get("total") or {}).get("totalTokens")
+            usage = p.get("tokenUsage") or {}
+            total = (usage.get("total") or {}).get("totalTokens")
             if isinstance(total, int):
                 self._tokens_now = total
+            last_in = (usage.get("last") or {}).get("inputTokens")
+            if isinstance(last_in, int) and last_in > 0:
+                self.context_tokens = last_in  # 마지막 요청의 입력 크기 = 현재 컨텍스트
+        elif method == "thread/compacted":
+            if self._compact_fut and not self._compact_fut.done():
+                self._compact_fut.set_result(True)
         elif method == "error":
             err = p.get("error") or {}
             msg = err.get("message") or "codex 오류"
@@ -190,6 +202,8 @@ class CodexAdapter(AgentAdapter):
                 self.emit("notice", text=f"codex: {text}"[:300], level="warn")
         elif method == "turn/completed":
             turn = p.get("turn") or {}
+            if self._compact_fut and not self._compact_fut.done() and not self.busy:
+                self._compact_fut.set_result(turn.get("status") == "completed")
             if self._turn_fut and not self._turn_fut.done() and (self._turn_id in (None, turn.get("id"))):
                 self._turn_fut.set_result(turn)
 
@@ -278,7 +292,10 @@ class CodexAdapter(AgentAdapter):
             status = turn.get("status")
             if status == "failed":
                 result.ok = False
-                result.error = ((turn.get("error") or {}).get("message")) or "turn failed"
+                err = turn.get("error") or {}
+                result.error = err.get("message") or "turn failed"
+                if err.get("codexErrorInfo") == "contextWindowExceeded":
+                    result.context_overflow = True
             elif status == "interrupted":
                 result.interrupted = True
         except Exception as e:
@@ -290,12 +307,32 @@ class CodexAdapter(AgentAdapter):
             self.busy = False
         result.text = self._texts[-1] if self._texts else ""
         result.full_text = "\n\n".join(self._texts)
+        result.context_tokens = self.context_tokens or None
+        if not result.ok and is_context_overflow(result.error):
+            result.context_overflow = True
         used = max(0, self._tokens_now - self._tokens_total)
         self._tokens_total = self._tokens_now
         result.tokens = used
         if used:
             self.bus.emit("usage", self.label, cost_usd=0.0, tokens=used)
         return result
+
+    async def compact(self, instructions: str = "") -> bool:
+        """app-server 의 thread/compact/start 로 스레드를 압축한다.
+        (Codex 압축은 지시문을 받지 않으므로 보존 내용은 작업 기억 파일이 맡는다.)"""
+        if not self.session_id or self.busy:
+            return False
+        self._compact_fut = asyncio.get_running_loop().create_future()
+        try:
+            await self.request("thread/compact/start", {"threadId": self.session_id})
+            ok = await asyncio.wait_for(self._compact_fut, 300)
+        except Exception:
+            ok = False
+        finally:
+            self._compact_fut = None
+        if ok:
+            self.context_tokens = 0
+        return bool(ok)
 
     async def interrupt(self) -> None:
         if self.busy and self._turn_id:

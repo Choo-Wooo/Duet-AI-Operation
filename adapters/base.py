@@ -22,6 +22,8 @@ class TurnResult:
     tokens: int | None = None
     interrupted: bool = False
     full_text: str | None = None
+    context_tokens: int | None = None  # 이번 턴 마지막 요청의 입력(컨텍스트) 크기
+    context_overflow: bool = False  # 모델 입력 한도 초과로 실패했는지
 
 
 class AgentAdapter(ABC):
@@ -44,8 +46,15 @@ class AgentAdapter(ABC):
         self.agreement_phase: str | None = None
         self.verification_command: str | None = None
         self.turn_kind: str | None = None
+        self.context_tokens = 0  # 마지막으로 관측한 세션 컨텍스트 크기(토큰)
+        self.handoff: str | None = None  # 세션 교체 직후 첫 턴에 붙일 안내
+        self.context_limit = 0  # 0 이 아니면 CLI 자체 자동 압축 기준으로도 전달 (Codex)
 
     def recovery_prompt(self, prompt: str) -> str:
+        if self.handoff:
+            note, self.handoff = self.handoff, None
+            self.restore_failed = False
+            return note + "\n\n" + prompt
         if self.restore_failed:
             self.restore_failed = False
             return "세션 복원 실패: DIALOGUE.md 전체를 읽고 맥락을 복구하라.\n\n" + prompt
@@ -73,6 +82,10 @@ class AgentAdapter(ABC):
     @abstractmethod
     async def run_turn(self, prompt: str) -> TurnResult: ...
 
+    async def compact(self, instructions: str = "") -> bool:
+        """CLI 고유의 대화 압축을 실행한다. 지원하지 않거나 실패하면 False."""
+        return False
+
     @abstractmethod
     async def interrupt(self) -> None: ...
 
@@ -85,3 +98,14 @@ def clip(text: str, n: int = 1200) -> str:
     if len(text) <= n:
         return text
     return text[: n // 2] + f"\n… ({len(text) - n}자 생략) …\n" + text[-n // 2:]
+
+
+_OVERFLOW_PATTERNS = (
+    "prompt is too long", "context length", "context_length", "contextwindowexceeded", "context window",
+    "maximum context", "too many tokens", "input is too long", "exceeds the maximum", "request too large",
+)
+
+
+def is_context_overflow(*texts: str | None) -> bool:
+    joined = " ".join(t for t in texts if t).lower()
+    return any(p in joined for p in _OVERFLOW_PATTERNS)

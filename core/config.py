@@ -25,11 +25,14 @@ class Role:
     brief: str = ""
     permissions: str = "workspace_write"
     effort: str | None = None  # codex: reasoning effort, claude: effort
+    context_limit: int | None = None  # 이 역할 세션의 컨텍스트 한도(토큰). 없으면 settings.context_limit_tokens
 
     def to_yaml(self) -> dict:
         d = {"cli": self.cli, "model": self.model, "brief": self.brief, "permissions": self.permissions}
         if self.effort:
             d["effort"] = self.effort
+        if self.context_limit:
+            d["context_limit"] = self.context_limit
         return d
 
 
@@ -127,7 +130,17 @@ class Config:
         self.state = State()
         self.settings: dict = {"checkpoint_every": 50, "git_snapshots": True,
                                "plan_rounds": 3, "plan_approval": "architect",
-                               "fingerprint_exclude": sorted(EXCLUDED_DIRS | EXCLUDED_FILES)}
+                               "fingerprint_exclude": sorted(EXCLUDED_DIRS | EXCLUDED_FILES),
+                               # 세션 컨텍스트가 이 토큰 수를 넘으면 다음 턴 전에 압축(/compact), 실패하면 새 세션
+                               "context_limit_tokens": 100000,
+                               # 한 턴 프롬프트의 최대 글자 수. 넘는 부분은 파일로 빼고 경로만 전달
+                               "prompt_max_chars": 20000,
+                               # DIALOGUE.md 가 이 크기(KB)를 넘으면 체크포인트 요약 후 이전 대화를 보관 폴더로 옮김
+                               "dialogue_max_kb": 120,
+                               # 작업이 끝났을 때 이 크기 이상이면 다음 턴 전에 미리 압축
+                               "compact_floor_tokens": 40000,
+                               # 질문 콘솔(/ask) 세션이 이 크기를 넘으면 압축
+                               "ask_compact_tokens": 200000}
         self.runtime: dict = {}  # 이번 실행에만 쓰는 값 (예산 등, 저장 안 함)
 
     # ---------- 로드 ----------
@@ -139,6 +152,10 @@ class Config:
             raise ValueError("settings.plan_rounds는 양의 정수여야 합니다")
         if self.settings["plan_approval"] not in ("architect", "human"):
             raise ValueError("settings.plan_approval은 architect 또는 human입니다")
+        for key in ("context_limit_tokens", "prompt_max_chars", "dialogue_max_kb", "compact_floor_tokens",
+                    "ask_compact_tokens"):
+            if type(self.settings[key]) is not int or self.settings[key] < 0:
+                raise ValueError(f"settings.{key}는 0 이상의 정수여야 합니다 (0 = 끔)")
         excluded = self.settings["fingerprint_exclude"]
         if not isinstance(excluded, list) or any(
                 not isinstance(name, str) or not name.strip() or name in (".", "..")
@@ -149,7 +166,11 @@ class Config:
             self.roles[name] = Role(
                 name=name, cli=r.get("cli", "claude"), model=r.get("model"), brief=r.get("brief", ""),
                 permissions=r.get("permissions", "workspace_write"), effort=r.get("effort"),
+                context_limit=r.get("context_limit"),
             )
+            cl = self.roles[name].context_limit
+            if cl is not None and (type(cl) is not int or cl < 0):
+                raise ValueError(f"roles.{name}.context_limit 는 0 이상의 정수여야 합니다")
         if self.main not in self.roles:
             raise ValueError(f"roles.yaml 의 main('{self.main}') 역할이 roles 에 없습니다.")
         if self.modes_file.exists():
@@ -237,7 +258,7 @@ def default_roles(clis: dict[str, str]) -> tuple[str, dict[str, Role]]:
             "architect", arch_cli, DEFAULT_MODELS[arch_cli],
             "사람의 요구를 설계로 바꾸고 작업을 나눠 위임한다. 구현 결과를 검토하고 구현자의 권한 요청을 심사한다. "
             "코드는 직접 고치지 않고 docs/ 와 DIALOGUE.md 만 쓴다.",
-            "read_only",
+            "read_only", context_limit=500000,
         ),
         "implementer": Role(
             "implementer", impl_cli, DEFAULT_MODELS[impl_cli],

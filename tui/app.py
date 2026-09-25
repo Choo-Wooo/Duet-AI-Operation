@@ -168,6 +168,9 @@ class DuetApp(App):
         elif k == "ask":
             dlg.write(Text(f"❓ {role}: {d['text']}", style="bold red"))
             self.bell()
+        elif k == "memory":
+            if rl:
+                rl.write(Text(f"· 작업 기억 갱신 ({d.get('chars', 0):,}자) → .duet/memory/{role}.md", style="dim"))
         elif k == "notice":
             style = "yellow" if d.get("level") == "warn" else "dim"
             (rl if (rl and role) else dlg).write(Text("· " + d["text"], style=style))
@@ -222,6 +225,11 @@ class DuetApp(App):
             t.append("○ 대기", style="dim")
         t.append(f" · 턴 {s.get('run_turns', 0)}/{mt} · 모드 {s.get('mode')}"
                  f" · 자동위임 {'on' if s.get('auto') else 'off'}")
+        for name, (size, limit) in (s.get("contexts") or {}).items():
+            if size:
+                hot = bool(limit) and size > limit * 0.8
+                t.append(f" · {name} {size // 1000}k" + (f"/{limit // 1000}k" if limit else ""),
+                         style="bold yellow" if hot else "dim")
         pa = s.get("pending_approvals", 0)
         t.append(f" · 승인 대기 {pa}", style="bold red" if pa else "")
         t.append(f" · API환산 ${s.get('cost_usd', 0):.2f} · {s.get('tokens', 0):,} tok · {el // 60}m{el % 60:02d}s")

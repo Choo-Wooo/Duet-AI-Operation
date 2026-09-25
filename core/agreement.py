@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import re
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -13,7 +14,9 @@ PHASES = ("plan", "plan_review", "implement", "verify")
 VERSION = re.compile(r"^## v(\d+)(?: \(deviation\))?\s*$", re.M)
 EXCLUDED_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", "DIALOGUE-archive", ".idea", ".vscode"}
 EXCLUDED_FILES = {".DS_Store"}
-DUET_RUNTIME = {"venv", "logs", "saves"}
+# (경로, 크기, 수정시각, inode) → sha256. 바뀌지 않은 큰 파일(월드·맵 등)을 매번 다시 읽지 않도록.
+_HASH_CACHE: dict[tuple, str] = {}
+DUET_RUNTIME = {"venv", "logs", "saves", "memory", "reports", "asks"}
 
 
 def new_task(role: str, instruction: str, base_commit: str | None, baseline: dict) -> dict:
@@ -162,15 +165,24 @@ def fingerprint(project: Path, exclude: list[str] | None = None) -> tuple[dict[s
             if rel == ".duet/state.json":
                 continue
             try:
-                if path.is_symlink():
+                st = os.lstat(path)
+                if stat.S_ISLNK(st.st_mode):
                     raw = os.readlink(path).encode()
                     values[rel] = hashlib.sha256(raw).hexdigest()
+                elif not stat.S_ISREG(st.st_mode):
+                    # FIFO·소켓·장치 파일은 열면 멈출 수 있으므로(named pipe 는 쓰는 쪽이 없으면 영원히 대기) 건너뛴다
+                    continue
                 else:
-                    with path.open("rb") as f:
-                        h = hashlib.sha256()
-                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                            h.update(chunk)
-                        values[rel] = h.hexdigest()
+                    key = (str(path), st.st_size, st.st_mtime_ns, st.st_ino)
+                    cached = _HASH_CACHE.get(key)
+                    if cached is None:
+                        with path.open("rb") as f:
+                            h = hashlib.sha256()
+                            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                                h.update(chunk)
+                            cached = h.hexdigest()
+                        _HASH_CACHE[key] = cached
+                    values[rel] = cached
             except OSError as e:
                 errors.append(f"{rel}: {e}")
     return values, errors

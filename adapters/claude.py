@@ -23,7 +23,15 @@ from ..core.clis import which
 from ..core.policy import ApprovalRequest
 from ..core.policy import PLAN_READ_TOOLS, NETWORK_TOOLS
 from ..core.prompts import REVIEW_SYSTEM
-from .base import AgentAdapter, TurnResult, clip
+from .base import AgentAdapter, TurnResult, clip, is_context_overflow
+
+
+def _context_size(usage) -> int:
+    """한 번의 API 요청에 들어간 입력 크기 = 새 입력 + 캐시 읽기 + 캐시 쓰기."""
+    if not isinstance(usage, dict):
+        return 0
+    return sum(int(usage.get(k) or 0) for k in
+               ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 FILE_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
 READONLY_TOOLS = ["Read", "Grep", "Glob", "LS"]
@@ -152,6 +160,9 @@ class ClaudeAdapter(AgentAdapter):
             await self.client.query(self.recovery_prompt(prompt))
             async for msg in self.client.receive_response():
                 if isinstance(msg, AssistantMessage):
+                    ctx = _context_size(getattr(msg, "usage", None))
+                    if ctx:
+                        self.context_tokens = ctx
                     for b in msg.content:
                         if isinstance(b, TextBlock) and b.text.strip():
                             texts.append(b.text)
@@ -166,7 +177,12 @@ class ClaudeAdapter(AgentAdapter):
                 elif isinstance(msg, ResultMessage):
                     self.session_id = msg.session_id or self.session_id
                     self.fork_session = False
-                    result.cost_usd = msg.total_cost_usd
+                    # total_cost_usd 는 세션 누적값이므로 이번 턴 증가분만 보고한다
+                    total = msg.total_cost_usd
+                    if total is not None:
+                        prev = getattr(self, "_cost_total", 0.0)
+                        result.cost_usd = total - prev if total >= prev else total
+                        self._cost_total = total
                     usage = msg.usage or {}
                     result.tokens = sum(int(usage.get(k) or 0) for k in
                                         ("input_tokens", "output_tokens", "cache_read_input_tokens",
@@ -184,9 +200,32 @@ class ClaudeAdapter(AgentAdapter):
             self.busy = False
         result.text = texts[-1] if texts else ""
         result.full_text = "\n\n".join(texts)
+        result.context_tokens = self.context_tokens or None
+        if not result.ok and is_context_overflow(result.error, result.text):
+            result.context_overflow = True
         if result.cost_usd is not None or result.tokens:
             self.bus.emit("usage", self.label, cost_usd=result.cost_usd or 0.0, tokens=result.tokens or 0)
         return result
+
+    async def compact(self, instructions: str = "") -> bool:
+        """Claude Code 의 /compact 로 대화를 요약·압축한다. instructions 로 보존할 내용을 지정한다."""
+        if not self.client or self.reviewer:
+            return False
+        ok = True
+        try:
+            await self.client.query(("/compact " + " ".join(instructions.split())).strip())
+            async for msg in self.client.receive_response():
+                if isinstance(msg, ResultMessage):
+                    self.session_id = msg.session_id or self.session_id
+                    if msg.is_error:
+                        ok = False
+                    if msg.total_cost_usd is not None:
+                        self._cost_total = msg.total_cost_usd
+        except Exception:
+            ok = False
+        if ok:
+            self.context_tokens = 0  # 다음 요청에서 다시 측정
+        return ok
 
     async def interrupt(self) -> None:
         if self.client and self.busy:

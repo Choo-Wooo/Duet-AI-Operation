@@ -15,7 +15,10 @@ HELP = """명령어
   /auto on|off              off 면 위임 전마다 확인
   /role list                역할 목록
   /role add <이름> <claude|codex> <모델> <설명…>
-  /role edit <이름> <항목>=<값>   (cli, model, brief, permissions, effort)
+  /role edit <이름> <항목>=<값>   (cli, model, brief, permissions, effort, context_limit)
+  /ask [역할]               새 창에 질문 콘솔 열기 (기본 설계자, 본 작업과 분리된 읽기 전용 분신)
+  /memory [역할]            역할의 작업 기억 파일 보기
+  /compact [역할]           다음 턴 전에 그 역할 대화 압축 예약
   /role remove <이름>
   /pause  /resume  /stop    자동 진행 멈춤 / 재개 / 현재 턴 중단
   /rollback <턴번호>         그 턴의 git 스냅샷으로 되돌리기
@@ -147,6 +150,26 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
         if not rest.lstrip("#").isdigit():
             return "사용법: /rollback <턴번호>"
         return await orch.rollback(int(rest.lstrip("#")))
+    if cmd == "ask":
+        from pathlib import Path
+        from .ask import launch_window
+        role = rest or orch.cfg.main
+        if role not in orch.cfg.roles:
+            return "역할: " + ", ".join(orch.cfg.roles)
+        return launch_window(Path(__file__).resolve().parent, orch.project, role)
+    if cmd == "memory":
+        from .core.textutil import memory_path
+        role = rest or orch.cfg.main
+        path = memory_path(orch.project, role)
+        if not path.exists():
+            return f"{role} 작업 기억이 아직 없습니다 (다음 턴부터 자동으로 생깁니다)."
+        return f"{path.relative_to(orch.project)}\n" + path.read_text(encoding="utf-8")[:4000]
+    if cmd == "compact":
+        role = rest or orch.cfg.main
+        if role not in orch.cfg.roles:
+            return "역할: " + ", ".join(orch.cfg.roles)
+        orch._compact_forced.add(role)
+        return f"{role}: 다음 턴 전에 대화를 압축합니다."
     if cmd == "status":
         return _fmt_status(orch)
     if cmd == "plan":

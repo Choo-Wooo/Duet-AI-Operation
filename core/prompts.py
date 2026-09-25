@@ -3,6 +3,37 @@ from __future__ import annotations
 
 from .config import Config, Role
 from .agreement import task_status
+from .textutil import summarize_paths
+
+MEMORY_SYSTEM = """
+## 작업 기억 (긴 세션 유지용)
+대화는 길어지면 압축되거나 새 세션으로 바뀝니다. 그래도 깊은 작업이 이어지도록 작업 기억을 유지합니다.
+- 매 턴의 마지막 응답 메시지(DIALOGUE.md 가 아니라 채팅 응답) 맨 끝에 아래 블록을 붙이세요. 오케스트레이터가
+  `.duet/memory/{role}.md` 에 저장하고 응답에서는 지웁니다. 매번 전체를 다시 쓰되 1500단어 이내로 압축하세요.
+```duet-memory
+## 목표
+## 현재 단계와 다음 할 일
+## 결정과 근거 (기각한 대안과 이유 포함)
+## 파일·모듈 지도 (핵심 경로와 역할)
+## 열린 질문·위험
+```
+- 맥락이 부족하다고 느끼거나 압축·새 세션 안내를 받으면 `.duet/memory/{role}.md` 부터 읽으세요.
+
+## 컨텍스트 절약
+- 여러 파일 탐색, 큰 파일·로그·데이터 분석은 보조 에이전트(Claude Code 의 Task/Explore, Codex 의 서브에이전트)에
+  맡기고 결론만 받으세요. 메인 대화에는 결론과 근거만 남깁니다.
+- 파일을 통째로 읽지 말고 grep·부분 읽기로 필요한 곳만 보세요. 명령 출력은 head/tail/grep 으로 줄이세요.
+"""
+
+COMPACT_MAIN = ("duet 설계자 대화 압축. 반드시 보존: 사람의 목표와 요구, 확정된 설계 결정과 근거, 기각한 대안과 이유, "
+                "합의된 계획(버전·파일·AC·test_command), 진행 중 작업과 다음 단계, 열린 질문·위험, 핵심 파일 경로. "
+                "버려도 됨: 도구 출력 원문, 이미 끝난 탐색 과정, 중복 설명.")
+COMPACT_WORKER = ("duet 구현자 대화 압축. 반드시 보존: 현재 위임 작업과 합의 계획, 바꾼 파일과 이유, 실패·통과한 테스트와 "
+                  "명령, 남은 할 일, 발견한 제약·버그, 핵심 파일 경로. 버려도 됨: 도구 출력 원문, 이미 해결된 시행착오.")
+
+
+def compact_instructions(cfg: Config, role: Role) -> str:
+    return COMPACT_MAIN if role.name == cfg.main else COMPACT_WORKER
 
 AGREEMENT_SYSTEM = """
 ## 합의 기반 위임
@@ -70,7 +101,8 @@ def system_append(cfg: Config, role: Role) -> str:
         directives = f"""- `<!-- duet: REPORT done -->` 또는 `<!-- duet: REPORT blocked -->` : 작업 결과를 메인 역할({cfg.main})에게 보고합니다.
 - `<!-- duet: ASK_HUMAN <질문> -->` : 자동 진행을 멈추고 사람에게 묻습니다.
 보고에는 한 일, 바꾼 파일, 테스트 결과, 남은 문제를 구체적으로 적으세요."""
-    return common + directives + (AGREEMENT_SYSTEM if cfg.mode.agreement or cfg.state.task else "")
+    return (common + directives + MEMORY_SYSTEM.replace("{role}", role.name)
+            + (AGREEMENT_SYSTEM if cfg.mode.agreement or cfg.state.task else ""))
 
 
 def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: str = "") -> str:
@@ -114,7 +146,7 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
             lines.append(f"계획 v{task['submitted_version']}를 읽고 요구 해석·설계 차이·AC 범위 및 "
                          "테스트가 AC를 검증하는지(모의가 핵심 로직을 대체하지 않는지) 검토하세요. "
                          f"AGREE v{task['submitted_version']} 또는 REVISE 사유. 수용한 설계 차이는 설계 문서에 반영하세요.")
-            lines.append("plan 파일 변경 경고: " + (", ".join(task["plan_changes"]) or "없음"))
+            lines.append("plan 파일 변경 경고: " + summarize_paths(task["plan_changes"]))
         elif task["phase"] == "implement":
             lines.append(f"{task['plan_path']}의 합의 v{task['agreed_version']}에서 벗어나지 마세요. "
                          "범위 변경이면 멈추고 새 계획 전문+REPORT deviation을 응답하세요. 계획 파일은 직접 고치지 마세요.")
@@ -153,3 +185,16 @@ def opinion_prompt(req_summary: str, role: str, reason: str, task: str) -> str:
     return (f"[의견 요청] 다음 요청은 위험 등급이라 사람이 최종 결정합니다. 사람에게 줄 의견을 주세요.\n"
             f"요청 역할: {role}\n요청: {req_summary}\n분류 사유: {reason}\n현재 작업: {task or '(없음)'}\n"
             'JSON 한 줄로만: {"decision": "allow" | "deny", "reason": "한 문장"}')
+
+
+ASK_SYSTEM = """
+# duet 질문 콘솔
+당신은 duet 프로젝트의 '{role}' 역할이 지금까지 쌓은 맥락을 이어받은 분신입니다. 사람이 이 프로젝트에 대해 묻는 질문에
+답합니다. 본 작업 흐름과는 분리된 곁가지 대화이므로:
+- 파일을 만들거나 고치지 말고, DIALOGUE.md 에도 쓰지 마세요. 읽기·검색만 합니다.
+- 최신 상태가 필요하면 DIALOGUE.md 의 최근 턴, `.duet/memory/{role}.md`, docs/ 를 필요한 부분만 읽으세요.
+- 흐름 제어 지시문(<!-- duet: ... -->)이나 duet-memory 블록은 쓰지 마세요.
+- 답은 간결하게, 근거가 된 파일 경로를 함께 알려주세요. 본 작업에 반영할 제안이면 그렇게 표시하세요.
+"""
+
+COMPACT_ASK = "질문 콘솔 대화 압축. 사람이 물은 질문과 답의 요지, 확인한 파일 경로, 프로젝트 핵심 맥락을 보존."

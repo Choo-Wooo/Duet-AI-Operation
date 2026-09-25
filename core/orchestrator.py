@@ -16,7 +16,8 @@ from .agreement import (changed_files, fingerprint, new_task, parse_plan, read_p
 from .events import Event, EventBus
 from .gitops import Git
 from .policy import ARCHITECT, AUTO, DENY, HUMAN, ApprovalRequest, Decision, Policy
-from .prompts import opinion_prompt, review_prompt, system_append, turn_prompt
+from .prompts import compact_instructions, opinion_prompt, review_prompt, system_append, turn_prompt
+from .textutil import extract_memory, save_memory, summarize_paths
 from .ui import HumanUI
 from .saves import delete_save, git_head, list_saves, read_save, write_save
 
@@ -35,6 +36,12 @@ def _parse_json(text: str) -> dict | None:
         return json.loads(m.group(0))
     except json.JSONDecodeError:
         return None
+
+
+def handoff_note(role: str) -> str:
+    return (f"[duet] 이전 세션이 컨텍스트 한도를 넘어 새 세션으로 이어갑니다. 먼저 `.duet/memory/{role}.md`(작업 기억)를 읽고, "
+            "DIALOGUE.md 의 가장 최근 체크포인트 요약과 최근 턴, 관련 docs/ 문서를 필요한 부분만 읽어 맥락을 복구하세요. "
+            "큰 파일은 통째로 읽지 말고 grep·부분 읽기로 필요한 곳만 보세요.")
 
 
 class Orchestrator:
@@ -73,6 +80,10 @@ class Orchestrator:
         self.hashes: list[str | None] = []
         self.task_history: list[str] = []
         self.notes: list[str] = []
+        self._turn_counter = 0
+        self._compacted_at: dict[str, int] = {}
+        self._compact_due: set[str] = set()  # 작업 경계에서 미리 압축할 역할
+        self._compact_forced: set[str] = set()  # 사람이 /compact 로 요청한 역할
         self.budget_usd: float | None = cfg.runtime.get("budget_usd")
         self.max_hours: float | None = cfg.runtime.get("max_hours")
         if cfg.state.task:
@@ -91,6 +102,7 @@ class Orchestrator:
     def status(self) -> dict[str, Any]:
         mt = self.cfg.max_turns
         return {
+            "contexts": {n: (ad.context_tokens, self.context_limit(n)) for n, ad in self.adapters.items()},
             "running": self.running_role,
             "busy": self.running,
             "run_turns": self.run_turns,
@@ -128,6 +140,7 @@ class Orchestrator:
         ad = make_adapter(role, self.project, self.bus, self.handle_approval, self.cfg.state.sessions.get(name),
                           system_append(self.cfg, role), fake=self.fake,
                           fork_session=name in self.cfg.state.fork_on_resume)
+        ad.context_limit = self.context_limit(name)
         self.notice(f"{name} 세션 시작 ({role.cli}/{role.model or '기본'})", role=name)
         try:
             await ad.start()
@@ -171,6 +184,11 @@ class Orchestrator:
         return self.reviewer
 
     async def close(self) -> None:
+        try:
+            from ..ask import stop_all
+            stop_all(self.project)
+        except Exception:
+            pass
         for ad in list(self.adapters.values()) + ([self.reviewer] if self.reviewer else []):
             try:
                 await ad.close()
@@ -217,12 +235,19 @@ class Orchestrator:
         if self.cfg.state.task:
             task = f"{self.cfg.state.task['instruction']}\n현재 합의 단계: {self.cfg.state.task['phase']}"
         prompt = (opinion_prompt if opinion_only else review_prompt)(req.summary, req.role, reason, task)
+        limit = int(self.cfg.settings.get("context_limit_tokens") or 0)
         try:
-            rev = await self.get_reviewer()
             async with self.reviewer_lock:
+                if self.reviewer and limit and self.reviewer.context_tokens > limit:
+                    await self._fresh_reviewer(f"컨텍스트 {self.reviewer.context_tokens:,} 토큰 > 한도 {limit:,}")
+                rev = await self.get_reviewer()
                 self.notice(f"설계자 심사 중: {req.summary[:100]}", role=self.cfg.main)
                 try:
                     tr = await asyncio.wait_for(rev.run_turn(prompt), timeout)
+                    if not tr.ok and tr.context_overflow:
+                        await self._fresh_reviewer("입력 한도 초과 오류")
+                        rev = await self.get_reviewer()
+                        tr = await asyncio.wait_for(rev.run_turn(prompt), timeout)
                     self._remember_session(self.cfg.main, rev, reviewer=True)
                 except asyncio.TimeoutError:
                     await rev.interrupt()
@@ -310,6 +335,8 @@ class Orchestrator:
     async def run(self, nxt: Next | None) -> None:
         try:
             await self._run_loop(nxt)
+            if not self.cfg.state.task:  # 요청 하나가 끝났으면 다음 요청 전에 정리
+                self.mark_compaction_due(reason="요청 종료")
         finally:
             if self.cfg.state.task and not self.cfg.state.task["waiting"]:
                 self._wait_task("진행 종료/중단 후 메인의 판단 대기")
@@ -353,7 +380,11 @@ class Orchestrator:
 
             # 체크포인트
             every = int(self.cfg.settings.get("checkpoint_every") or 0)
-            if every and nxt[0] == self.cfg.main and self.cfg.state.turns_since_checkpoint >= every:
+            max_kb = int(self.cfg.settings.get("dialogue_max_kb") or 0)
+            too_big = bool(max_kb and self.dialogue.path.exists()
+                           and self.dialogue.path.stat().st_size > max_kb * 1024
+                           and self.cfg.state.turns_since_checkpoint >= 4)
+            if nxt[0] == self.cfg.main and ((every and self.cfg.state.turns_since_checkpoint >= every) or too_big):
                 res = await self._turn(self.cfg.main, "checkpoint", "")
                 if res and res[0].ok:
                     dest = self.dialogue.archive_before(res[1].n)
@@ -410,6 +441,111 @@ class Orchestrator:
             return True
         return False
 
+    # ================= 컨텍스트 관리 =================
+    def _write_report(self, name: str, lines: list[str]) -> str:
+        d = self.cfg.dir / "reports"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / name
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path.relative_to(self.project).as_posix()
+
+    def _paths_note(self, label: str, paths: list[str], report: str) -> str:
+        if len(paths) <= 20:
+            return summarize_paths(paths)
+        rel = self._write_report(report, paths)
+        return summarize_paths(paths) + f" (전체 목록: {rel})"
+
+    def _guard_prompt(self, prompt: str, n: int, role: str) -> str:
+        limit = int(self.cfg.settings.get("prompt_max_chars") or 0)
+        if not limit or len(prompt) <= limit:
+            return prompt
+        rel = self._write_report(f"prompt-{n}-{role}.md", [prompt])
+        head = prompt[: int(limit * 0.7)]
+        tail = prompt[-int(limit * 0.2):]
+        self.notice(f"{role} #{n} 프롬프트가 {len(prompt):,}자로 길어 일부를 {rel} 로 뺐습니다.", "warn", role=role)
+        return (head + f"\n\n… (중간 {len(prompt) - len(head) - len(tail):,}자 생략 — 전체는 {rel} 에서 필요한 부분만 읽으세요) …\n\n"
+                + tail)
+
+    async def _rotate_session(self, name: str, reason: str) -> AgentAdapter:
+        """세션을 버리고 새 세션으로 시작한다. 맥락은 DIALOGUE.md 로 이어받는다."""
+        old = self.adapters.pop(name, None)
+        if old:
+            await old.close()
+        self.cfg.state.sessions.pop(name, None)
+        if name in self.cfg.state.fork_on_resume:
+            self.cfg.state.fork_on_resume.remove(name)
+        self.cfg.save_state()
+        self._compacted_at.pop(name, None)
+        self.notice(f"{name} 세션을 새로 시작합니다 ({reason}). 이전 맥락은 DIALOGUE.md 로 이어받습니다.", "warn", role=name)
+        ad = await self.adapter(name)
+        ad.handoff = handoff_note(name)
+        return ad
+
+    def context_limit(self, name: str) -> int:
+        role = self.cfg.roles.get(name)
+        if role and role.context_limit is not None:
+            return int(role.context_limit)
+        return int(self.cfg.settings.get("context_limit_tokens") or 0)
+
+    def mark_compaction_due(self, names=None, reason: str = "") -> None:
+        """작업 경계(작업 완료·요청 종료)에서 다음 턴 전에 미리 압축하도록 표시한다."""
+        for name in (names if names is not None else list(self.adapters)):
+            self._compact_due.add(name)
+
+    async def _ensure_context(self, name: str, ad: AgentAdapter) -> AgentAdapter:
+        """다음 턴 전에: 한도를 넘었거나 작업 경계라면 압축, 압축으로 부족하면 새 세션."""
+        limit = self.context_limit(name)
+        size = ad.context_tokens
+        floor = int(self.cfg.settings.get("compact_floor_tokens") or 0)
+        forced = name in self._compact_forced
+        due = forced or (name in self._compact_due and size > floor)
+        self._compact_due.discard(name)
+        self._compact_forced.discard(name)
+        over = bool(limit and size > limit)
+        if not over and not due:
+            return ad
+        # 직전 2턴 안에 이미 압축했는데도 한도를 넘으면 압축으로는 부족하다고 보고 교체
+        if not over or self._turn_counter - self._compacted_at.get(name, -99) > 2:
+            why = (f"컨텍스트 {size:,} 토큰이 한도 {limit:,} 를 넘어" if over
+                   else "요청에 따라" if forced else f"작업 단위가 끝나 (컨텍스트 {size:,} 토큰)")
+            self.notice(f"{name} {why} 대화를 압축합니다.", "warn" if over else "info", role=name)
+            self.running_role = name
+            self.emit_status()
+            try:
+                ok = await ad.compact(compact_instructions(self.cfg, self.cfg.roles[name]))
+            finally:
+                self.running_role = None
+            if ok:
+                self._compacted_at[name] = self._turn_counter
+                self._remember_session(name, ad)
+                self.notice(f"{name} 압축 완료.", role=name)
+                return ad
+            self.notice(f"{name} 압축에 실패했습니다.", "warn", role=name)
+            if not over:
+                return ad
+        return await self._rotate_session(name, f"컨텍스트 {size:,} 토큰 > 한도 {limit:,}")
+
+    def _keep_memory(self, name: str, tr: TurnResult) -> None:
+        """응답 끝의 duet-memory 블록을 작업 기억 파일로 저장하고 응답에서 뺀다."""
+        full, body = extract_memory(tr.full_text)
+        text, body2 = extract_memory(tr.text)
+        tr.full_text, tr.text = full, text or ""
+        body = body or body2
+        if body:
+            try:
+                save_memory(self.project, name, body)
+                self.bus.emit("memory", name, chars=len(body))
+            except OSError as e:
+                self.notice(f"작업 기억을 저장하지 못했습니다: {e}", "warn", role=name)
+
+    async def _fresh_reviewer(self, reason: str) -> None:
+        if self.reviewer:
+            await self.reviewer.close()
+        self.reviewer = None
+        self.cfg.state.reviewer_sessions.pop(self.cfg.main, None)
+        self.cfg.save_state()
+        self.notice(f"설계자 심사 세션을 새로 시작합니다 ({reason}).", role=self.cfg.main)
+
     def _next_number(self) -> int:
         return max(self.cfg.state.last_n, self.dialogue.max_number()) + 1
 
@@ -426,13 +562,24 @@ class Orchestrator:
         except Exception as e:
             self.bus.emit("error", role_name, text=f"{role_name} 세션을 시작하지 못했습니다: {e}")
             return None
+        self._turn_counter += 1
+        try:
+            ad = await self._ensure_context(role_name, ad)
+        except Exception as e:
+            self.bus.emit("error", role_name, text=f"{role_name} 세션을 정리하지 못했습니다: {e}")
+            return None
         role = self.cfg.roles[role_name]
         task = self.cfg.state.task
-        ad.turn_kind = kind
-        ad.agreement_phase = task["phase"] if task else None
-        ad.plan_read_only = bool(task and role_name != self.cfg.main
-                                 and (task["phase"] in ("plan", "plan_review") or task["waiting"]))
-        ad.verification_command = task["test_command"] if task and task["phase"] == "verify" and role_name == self.cfg.main else None
+
+        def prepare(a: AgentAdapter) -> None:
+            a.turn_kind = kind
+            a.agreement_phase = task["phase"] if task else None
+            a.plan_read_only = bool(task and role_name != self.cfg.main
+                                    and (task["phase"] in ("plan", "plan_review") or task["waiting"]))
+            a.verification_command = (task["test_command"] if task and task["phase"] == "verify"
+                                      and role_name == self.cfg.main else None)
+
+        prepare(ad)
         self.policy.task = task
         n = self._next_number()
         since = self.cfg.state.seen.get(role_name, 0) + 1
@@ -443,8 +590,9 @@ class Orchestrator:
                 current = self._fingerprint()
                 changes = changed_files(task["agree_fingerprint"], current)
                 outside = [p for p in changes if p not in task["agreed_files"]]
-                prompt += "\nAGREE 시점 이후 변경: " + (", ".join(changes) or "없음")
-                prompt += "\n계획 외 변경 경고: " + (", ".join(outside) or "없음")
+                prompt += "\nAGREE 시점 이후 변경: " + self._paths_note("변경", changes, f"changes-{n}.txt")
+                prompt += "\n계획 외 변경 경고: " + self._paths_note("계획 외", outside, f"outside-{n}.txt")
+        prompt = self._guard_prompt(prompt, n, role_name)
         if kind == "delegate":
             self.current_task[role_name] = info
         self.running_role = role_name
@@ -452,8 +600,19 @@ class Orchestrator:
         self.emit_status()
 
         tr = await ad.run_turn(prompt)
+        if not tr.ok and tr.context_overflow and not tr.interrupted and not self.stop_requested:
+            # 입력 한도 초과: 같은 세션으로는 다시 해도 실패하므로 새 세션으로 한 번 자동 재시도
+            self.notice(f"{role_name} 입력이 모델 한도를 넘었습니다. 새 세션으로 이 턴을 다시 실행합니다.", "warn",
+                        role=role_name)
+            try:
+                ad = await self._rotate_session(role_name, "입력 한도 초과 오류")
+                prepare(ad)
+                tr = await ad.run_turn(prompt)
+            except Exception as e:
+                tr.error = f"{tr.error} / 새 세션 재시도 실패: {e}"
 
         self.running_role = None
+        self._keep_memory(role_name, tr)
         self._remember_session(role_name, ad)
         # plan 작업자는 파일을 쓰지 않는다. 전문은 계획서에, 요약만 대화에 기록한다.
         full = tr.full_text if tr.full_text is not None else tr.text
@@ -477,12 +636,13 @@ class Orchestrator:
             if task["phase"] in ("plan", "plan_review"):
                 task["plan_changes"] = changed_files(task["delegate_fingerprint"], current)
                 if task["plan_changes"]:
-                    self.notice("plan 단계 파일 변경 경고: " + ", ".join(task["plan_changes"]), "warn")
+                    self.notice("plan 단계 파일 변경 경고: "
+                                + self._paths_note("plan", task["plan_changes"], f"plan-changes-{n}.txt"), "warn")
             else:
                 outside = [p for p in changed_files(task["agree_fingerprint"], current)
                            if p not in task["agreed_files"]]
                 if outside:
-                    self.notice("계획 외 변경 경고: " + ", ".join(outside), "warn")
+                    self.notice("계획 외 변경 경고: " + self._paths_note("계획 외", outside, f"outside-{n}.txt"), "warn")
         turn = self.dialogue.find(role_name, n)
         if turn is None:  # 에이전트가 문서에 쓰지 않았으면 대신 기록
             body = tr.text.strip() or ("(응답 없음)" if tr.ok else f"(오류) {tr.error}")
@@ -592,6 +752,7 @@ class Orchestrator:
     def _finish_task(self, reason: str) -> None:
         task = self.cfg.state.task
         if task:
+            self.mark_compaction_due(reason=f"작업 {task['id']} 종료")
             self.cfg.state.task = None
             self.policy.task = None
             self.current_task.pop(task["role"], None)
@@ -874,8 +1035,20 @@ class Orchestrator:
         r = self.cfg.roles.get(name)
         if not r:
             return f"'{name}' 역할이 없습니다."
+        if field == "context_limit":
+            v = value.replace(",", "").replace("_", "").lower().strip()
+            mult = 1000 if v.endswith("k") else 1
+            try:
+                n = int(v.rstrip("k")) * mult if v not in ("", "none", "default") else None
+            except ValueError:
+                return "context_limit 은 숫자입니다 (예: 500000, 500k, default)"
+            r.context_limit = n
+            self.cfg.save_roles()
+            if name in self.adapters:
+                self.adapters[name].context_limit = self.context_limit(name)
+            return f"{name}.context_limit = {self.context_limit(name):,} 토큰"
         if field not in ("cli", "model", "brief", "permissions", "effort"):
-            return "바꿀 수 있는 항목: cli, model, brief, permissions, effort"
+            return "바꿀 수 있는 항목: cli, model, brief, permissions, effort, context_limit"
         if field == "cli" and value not in SUPPORTED_CLIS:
             return "cli 는 claude 또는 codex"
         setattr(r, field, value or None)

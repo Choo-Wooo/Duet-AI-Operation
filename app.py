@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     session.add_argument("--load", metavar="이름", help="저장된 대화 세션을 불러온 뒤 시작")
     p.add_argument("--list-saves", action="store_true", help="저장된 세션 목록 출력 후 종료")
     p.add_argument("-m", "--message", help="시작하자마자 설계자에게 보낼 메시지")
+    p.add_argument("--ask", nargs="?", const="", metavar="역할",
+                   help="질문 콘솔만 실행 (기본: 메인 역할). 보통은 duet 안에서 /ask 로 새 창을 엽니다")
     return p.parse_args(argv)
 
 
@@ -81,6 +84,9 @@ def setup_project(duet_dir: Path, project: Path, fake: bool) -> tuple[Config, li
 
 
 def main(duet_dir: Path, project: Path, argv: list[str]) -> int:
+    # Claude Code 안에서 실행된 경우 그 세션 정보가 하위 claude 로 새지 않게 한다
+    for key in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION"):
+        os.environ.pop(key, None)
     args = parse_args(argv)
     if args.list_saves:
         try:
@@ -89,6 +95,17 @@ def main(duet_dir: Path, project: Path, argv: list[str]) -> int:
             print(f"[duet] {e}")
             return 2
         return 0
+    if args.ask is not None:
+        from .ask import run_ask
+        cfg = Config(project)
+        if not cfg.roles_file.exists():
+            cfg, _ = setup_project(duet_dir, project, args.fake)
+        else:
+            cfg.load()
+        try:
+            return asyncio.run(run_ask(cfg, args.ask or None, args.fake))
+        except KeyboardInterrupt:
+            return 0
     cfg, msgs = setup_project(duet_dir, project, args.fake)
     if args.load:
         from .console import ConsoleUI
