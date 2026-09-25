@@ -21,7 +21,7 @@ from duet.core.config import Config, Role
 from duet.core.dialogue import Dialogue, extract_directives
 from duet.core.events import EventBus
 from duet.core.orchestrator import Orchestrator
-from duet.core.policy import AUTO, DENY, ApprovalRequest
+from duet.core.policy import HUMAN, AUTO, DENY, ApprovalRequest
 
 PLAN = """### 요구
 응답 함수를 구현한다.
@@ -423,11 +423,15 @@ def test_T6_policy_cache_and_exact_verify_command(orch):
     assert policy.classify(exact, main)[0] == AUTO
     policy.remember(exact)
     assert exact.cache_key() not in policy.session_allow
+    # 합의 명령과 다른 실행은 막지 않고 사람 확인으로 넘긴다(세션 허용으로도 건너뛰지 않음)
     for cmd in (task["test_command"] + " -x", "python -m pytest -q", "X=1 " + task["test_command"],
-                "bash -lc '" + task["test_command"] + "'", task["test_command"] + "; touch x"):
+                task["test_command"] + "; touch x", task["test_command"] + " > out.txt"):
         req = ApprovalRequest("architect", "command", "test", command=cmd)
         policy.session_allow.add(req.cache_key())
-        assert policy.classify(req, main)[0] == DENY
+        assert policy.classify(req, main)[0] == HUMAN
+    # 합의 명령 그대로(셸 래핑 포함)와 출력 줄이기는 자동
+    for cmd in ("bash -lc '" + task["test_command"] + "'", task["test_command"] + " 2>&1 | tail -20"):
+        assert policy.classify(ApprovalRequest("architect", "command", "test", command=cmd), main)[0] == AUTO
     assert policy.classify(ApprovalRequest("architect", "command", "read", command="cat src.py"), main)[0] == AUTO
 
 

@@ -16,8 +16,29 @@ SAFE_TOOLS = {"Read", "Grep", "Glob", "LS", "TodoWrite", "Task", "Agent", "Noteb
               "KillShell", "ListMcpResourcesTool", "ReadMcpResourceTool", "Skill", "ToolSearch"}
 NETWORK_TOOLS = {"WebFetch", "WebSearch"}
 PLAN_READ_TOOLS = {"Read", "Grep", "Glob"}
-READ_COMMAND = re.compile(r"^(?:ls|pwd|cat|head|tail|wc|grep|rg|find|tree|which|diff|stat|file|du|sort|uniq|cut|"
-                          r"sed -n|git (?:status|diff|log|show|branch|rev-parse|ls-files|blame))\b")
+# 읽기 전용 명령 (모든 역할·모든 단계에서 파일로 리다이렉트하지 않으면 자동 허용)
+READ_COMMAND = re.compile(
+    r"^(?:ls|pwd|cat|head|tail|wc|grep|egrep|rg|find|tree|which|diff|stat|file|du|df|sort|uniq|cut|tr|nl|column|"
+    r"comm|paste|xxd|od|hexdump|jq|less|more|basename|dirname|realpath|readlink|date|whoami|uname|ps|test|true|echo|"
+    r"printf|git (?:status|diff|log|show|branch|rev-parse|ls-files|blame|grep))\b"
+    r"|^sed(?![^|]*\s-i)\b"            # sed (단 -i 제자리 수정 제외)
+    r"|^awk(?![^|]*system\s*\()\b"    # awk (단 system() 호출 제외)
+)
+# find 의 파일 변경 옵션
+_FIND_WRITES = re.compile(r"\s-(?:delete|exec|execdir|ok|fprint\w*)\b")
+# 경로 규칙(~, /etc, /usr …): 읽기 전용 명령에는 적용하지 않는다
+PATH_RULE_HINT = "/etc"
+
+
+def is_read_command(part: str) -> bool:
+    return bool(READ_COMMAND.search(part)) and not (part.startswith("find") and _FIND_WRITES.search(part))
+
+
+def writes_output(cmd: str) -> bool:
+    """파일로 리다이렉트하는지 (2>&1, >/dev/null 은 제외, 따옴표 안의 > 는 무시)."""
+    unquoted = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "", cmd)
+    stripped = re.sub(r"\d?>&\d|\d?>>?\s*/dev/null", "", unquoted)
+    return ">" in stripped or re.search(r"\btee\b", unquoted) is not None
 
 
 @dataclass
@@ -51,7 +72,36 @@ class Decision:
     interrupt: bool = False
 
 
-_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+def _split_unquoted(cmd: str) -> list[str]:
+    """따옴표 밖의 &&, ||, ;, |, 줄바꿈 에서만 나눈다 (grep -E "a|b" 의 | 는 나누지 않음)."""
+    parts, buf, q, i = [], [], None, 0
+    while i < len(cmd):
+        c = cmd[i]
+        if q:
+            buf.append(c)
+            if c == "\\" and q == '"' and i + 1 < len(cmd):
+                buf.append(cmd[i + 1])
+                i += 1
+            elif c == q:
+                q = None
+        elif c in "'\"":
+            q = c
+            buf.append(c)
+        elif c == "\\" and i + 1 < len(cmd):
+            buf.append(c + cmd[i + 1])
+            i += 1
+        elif cmd.startswith(("&&", "||"), i):
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+        elif c in ";|\n":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(c)
+        i += 1
+    parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
 
 
 def split_commands(cmd: str) -> list[str]:
@@ -60,10 +110,9 @@ def split_commands(cmd: str) -> list[str]:
     m = re.match(r"^(?:/bin/)?(?:ba|z)?sh\s+-l?c\s+(['\"])(.*)\1$", cmd, re.S)
     if m:
         cmd = m.group(2)
-    parts = [p.strip() for p in _SPLIT_RE.split(cmd) if p.strip()]
-    # 환경변수 접두어(FOO=bar cmd) 제거, cd 는 무해 처리
     out = []
-    for p in parts:
+    for p in _split_unquoted(cmd):
+        # 환경변수 접두어(FOO=bar cmd) 제거
         p = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+", "", p)
         # 첫 토큰의 경로 접두어 제거: /root/.local/bin/pytest → pytest, .venv/bin/python → python
         p = re.sub(r"^(?:\S*/)(?=[^/\s]+(\s|$))", "", p)
@@ -82,9 +131,26 @@ class Policy:
         self.task: dict | None = None
 
     def verification_command(self, req: ApprovalRequest) -> bool:
-        return bool(self.task and self.task["phase"] == "verify" and req.role == self.main_role
-                    and req.kind == "command" and self.task["test_command"]
-                    and (req.command or "").strip() == self.task["test_command"])
+        """합의 test_command 그대로, 또는 그 출력을 head/tail/grep 으로 줄인 형태."""
+        if not (self.task and self.task["phase"] == "verify" and req.role == self.main_role
+                and req.kind == "command" and self.task["test_command"]):
+            return False
+        cmd, test = (req.command or "").strip(), self.task["test_command"].strip()
+        m = re.match(r"^(?:/bin/)?(?:ba|z)?sh\s+-l?c\s+(['\"])(.*)\1$", cmd, re.S)
+        if m:
+            cmd = m.group(2).strip()
+        cmd = re.sub(r"^cd\s+\S+\s*&&\s*", "", cmd)
+        if cmd == test:
+            return True
+        if not cmd.startswith(test):
+            return False
+        rest = cmd[len(test):].strip()
+        rest = re.sub(r"^2>&1\s*", "", rest)
+        if not rest.startswith("|"):
+            return False
+        tail = _split_unquoted(rest[1:])
+        return bool(tail) and all(re.match(r"^(?:head|tail|grep|egrep|rg|wc|sed -n|cat)\b", p) for p in tail) \
+            and not writes_output(rest)
 
     # ---- 경로 ----
     def _rel(self, p: str) -> str | None:
@@ -115,8 +181,9 @@ class Policy:
                     return HUMAN, "합의 명령이지만 기존 위험 명령 정책에 해당합니다."
                 return AUTO, "합의된 검증 명령 (1회)"
             parts = split_commands(req.command or "")
-            if not parts or not all(READ_COMMAND.search(p) for p in parts):
-                return DENY, "verify에서는 합의된 test_command만 정확히 실행할 수 있습니다."
+            if not (parts and all(is_read_command(p) or p.startswith("cd ") for p in parts)
+                    and not writes_output(req.command or "")):
+                return HUMAN, "verify 단계의 합의 명령·읽기 외 명령 (사람 확인)"
         if not plan and req.cache_key() in self.session_allow:
             return AUTO, "이번 세션에서 이미 허용한 요청"
         read_only = role.permissions == "read_only"
@@ -135,13 +202,25 @@ class Policy:
 
         if req.kind == "command":
             cmd = req.command or ""
-            if any(r.search(cmd) for r in self.human_res):
-                return HUMAN, "위험 명령(삭제·push·네트워크·권한 등)"
             parts = split_commands(cmd)
-            if parts and all(any(r.search(p) for r in self.auto_res) or p.startswith("cd ") for p in parts):
+            redirect = writes_output(cmd)
+            read_only_cmd = bool(parts) and not redirect and all(
+                is_read_command(p) or p.startswith("cd ") for p in parts)
+            hits = [r for r in self.human_res if r.search(cmd)]
+            if read_only_cmd:  # 읽기만 하는 명령은 프로젝트 밖 경로 규칙을 적용하지 않는다
+                hits = [r for r in hits if PATH_RULE_HINT not in r.pattern]
+            if hits:
+                return HUMAN, "위험 명령(삭제·push·네트워크·권한·프로젝트 밖 경로 등)"
+            if read_only_cmd:
+                return AUTO, "읽기 전용 명령"
+            if not redirect and parts and all(
+                    (any(r.search(p) for r in self.auto_res) and not _FIND_WRITES.search(p)
+                     and not (read_only and re.match(r"^(?:mkdir|touch|cp|mv)\b", p)))
+                    or is_read_command(p) or p.startswith("cd ")
+                    for p in parts):
                 return AUTO, "안전한 명령"
             if read_only:
-                return DENY, f"'{role.name}' 역할은 이 명령을 실행할 수 없습니다. 필요하면 구현 역할에게 위임하세요."
+                return HUMAN, f"'{role.name}' 역할의 목록 밖 명령 (사람 확인 — A 로 세션 동안 허용 가능)"
             return self._architect_or_human(role, "목록에 없는 명령")
 
         if req.kind == "tool":
