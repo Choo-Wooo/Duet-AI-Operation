@@ -15,13 +15,17 @@ from .core.saves import format_saves, list_saves
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="duet", description="Claude Code × Codex 오케스트레이터")
+    p = argparse.ArgumentParser(prog="duet", description="Claude Code × Codex × Antigravity 오케스트레이터")
     p.add_argument("--mode", help="대화 모드 (sprint, review, deliberate, …)")
     p.add_argument("--max-turns", help="요청당 턴 한도 (숫자 또는 inf)")
     p.add_argument("--budget-usd", type=float, help="비용 한도(선택, 기본 없음)")
     p.add_argument("--max-hours", type=float, help="시간 한도(선택, 기본 없음)")
     p.add_argument("--fake", action="store_true", help="CLI 없이 가짜 에이전트로 흐름 시험")
     p.add_argument("--no-tui", action="store_true", help="분할 화면 대신 단순 콘솔 모드")
+    p.add_argument("--web", action="store_true", help="브라우저 웹 UI 로 실행 (http://127.0.0.1:8765)")
+    p.add_argument("--port", type=int, default=8765, help="웹 UI 포트 (사용 중이면 다음 번호)")
+    p.add_argument("--host", default="127.0.0.1", help="웹 UI 주소 (기본 127.0.0.1 = 이 컴퓨터에서만)")
+    p.add_argument("--no-browser", action="store_true", help="웹 UI 를 열 때 브라우저를 자동으로 띄우지 않음")
     p.add_argument("--no-venv", action="store_true", help="가상환경 자동 준비를 건너뜀")
     session = p.add_mutually_exclusive_group()
     session.add_argument("--new-session", action="store_true", help="저장된 에이전트 세션을 버리고 새로 시작")
@@ -143,7 +147,11 @@ def main(duet_dir: Path, project: Path, argv: list[str]) -> int:
 
     bus = EventBus(cfg.logs_dir)
     try:
-        if args.no_tui:
+        if args.web:
+            from .web.server import serve
+            asyncio.run(serve(cfg, bus, msgs, args.fake, args.message, host=args.host, port=args.port,
+                              open_browser=not args.no_browser))
+        elif args.no_tui:
             from .console import run_console
             asyncio.run(run_console(cfg, bus, msgs, args.fake, args.message))
         else:

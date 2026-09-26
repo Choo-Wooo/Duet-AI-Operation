@@ -71,7 +71,7 @@ class DuetApp(App):
     def color(self, role: str | None) -> str:
         if not role:
             return "white"
-        base = role.split(" ")[0]
+        base = role.split(" ")[0].split("#")[0]
         if base not in self.role_colors:
             self.role_colors[base] = PALETTE[len(self.role_colors) % len(PALETTE)]
         return self.role_colors[base]
@@ -99,7 +99,7 @@ class DuetApp(App):
     def role_log(self, role: str | None) -> RichLog | None:
         if not role:
             return None
-        base = role.split(" ")[0]
+        base = role.split(" ")[0].split("#")[0]
         try:
             return self.query_one("#" + _safe_id(base) + "-log", RichLog)
         except Exception:
@@ -118,6 +118,22 @@ class DuetApp(App):
         d, role, k = ev.data, ev.role, ev.kind
         c = self.color(role)
         rl = self.role_log(role)
+        tag = f"[{role.split('#', 1)[1]}] " if role and "#" in role else ""
+        if tag and k in ("text", "tool", "tool_output") and rl:  # 병렬 작업 세션: 역할 탭에 작업 id 를 붙여 표시
+            body = d.get("text") if k != "tool" else "▸ " + d["detail"]
+            if k == "tool_output":
+                body = ("  ✓ " if d.get("ok") else "  ✗ ") + (d.get("text") or "").strip()[:600]
+            rl.write(Text(tag + (body or ""), style=c if k == "text" else "dim"))
+            return
+        if tag and k in ("turn_start", "turn_end"):
+            if rl and k == "turn_start":
+                rl.write(Text(f"\n━━ {tag}{d['kind']} ━━", style=f"bold {c}"))
+            return
+        if k == "work":
+            style = "yellow" if d["status"].startswith("waiting") or d["status"] == "failed" else "cyan"
+            dlg.write(Text(f"· 작업 {d['id']} → {d['status']}" + (f" ({d['reason']})" if d.get("reason") else ""),
+                           style=style))
+            return
         if k == "human":
             t = Text()
             t.append(f"\n[사람 #{d['n']}] ", style="bold white on #3b4261")

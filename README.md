@@ -1,4 +1,4 @@
-# duet — Claude Code × Codex 오케스트레이터
+# duet — Claude Code × Codex × Antigravity 오케스트레이터
 
 설계자 에이전트와 대화하면, 설계자가 구현자(및 추가 역할)에게 일을 나눠 주고 결과를 검토하며 개발을 이어갑니다.
 에이전트끼리는 프로젝트 루트의 `DIALOGUE.md` 한 문서로 대화하고, 각 CLI(Claude Code, Codex)는 자기 하네스(도구, CLAUDE.md/AGENTS.md, MCP, 스킬, 세션 기억)를 그대로 씁니다.
@@ -11,21 +11,72 @@ cp -r duet ~/my-project/
 
 # 2) 프로젝트 폴더에서 실행
 cd ~/my-project
-python3 duet
+python3 duet          # 터미널 분할 화면(TUI)
+python3 duet --web    # 브라우저 웹 UI (권장)
 ```
+
+`--web` 은 이 컴퓨터(127.0.0.1)에서만 열리는 웹 서버를 띄우고, 실행마다 새로 만든 토큰이 붙은 주소를 브라우저로 엽니다
+(`--port 8765`, `--no-browser`). 종료는 터미널에서 Ctrl+C.
 
 처음 실행하면 자동으로 다음을 준비합니다.
 
 - `.duet/venv` 가상환경 + 의존성(claude-agent-sdk, textual, pyyaml). 파이썬 3.10+ 이 필요하며, 없으면 Homebrew 파이썬이나 `uv` 를 찾아 씁니다.
-- 설치된 CLI 감지 → `.duet/roles.yaml` 생성 (기본: 설계자 Claude `claude-opus-5-5`, 구현자 Codex `gpt-6-astra`)
+- 설치된 CLI 감지 → `.duet/roles.yaml` 생성
+  - 설계자 Claude `claude-opus-5-5` · 구현자 Codex `gpt-6-astra`(effort medium, 병렬 최대 3)
+  - 디자이너 Claude `claude-sonnet-5`(병렬 최대 2) · 리서처 Antigravity `gemini-3.8-flash-medium`(병렬 최대 2)
 - `.duet/modes.yaml`, `.duet/policy.yaml`, `DIALOGUE.md`
 - git 저장소가 아니면 `git init` (턴마다 스냅샷 커밋, `/rollback` 용). `.gitignore` 에 duet 폴더·venv·로그 추가
 
-사전 조건: `claude`, `codex` 중 쓰려는 CLI가 설치·로그인되어 있어야 합니다.
+사전 조건: `claude`, `codex`, `agy`(Antigravity CLI) 중 쓰려는 CLI가 설치·로그인되어 있어야 합니다.
+API 를 직접 부르지 않고 설치된 CLI 를 그대로 띄우므로 각 CLI 의 구독·설정·MCP 가 그대로 쓰입니다.
 
 옵션: `--mode deliberate`, `--max-turns inf`, `--budget-usd 5`, `--max-hours 2`, `--no-tui`(단순 콘솔), `--fake`(CLI 없이 흐름 시험), `--new-session`, `--load <이름>`, `--list-saves`, `-m "첫 메시지"`
 
-## 화면
+## 웹 UI (`--web`)
+
+- **진행**: 왼쪽 대화 흐름(사람·턴 요약·지시문·승인·단계), 오른쪽 실시간 출력(역할 필터). 승인·선택 요청은 위에 카드로 뜹니다.
+  아래 입력창의 대상 선택으로 메인·특정 역할·병렬 작업 세션에 직접 말할 수 있습니다.
+- **작업 보드**: 병렬 작업 카드(대기·진행·완료·중단), 작업별 기록 보기, 재개·취소
+- **질문**: 역할 세션을 복제한 읽기 전용 분신에게 프로젝트 질문 (본 작업에 영향 없음)
+- **세션**: 지금 세션 저장, 이전 세션 목록에서 불러오기·삭제
+- **역할·모델**: 로그인된 각 CLI 에서 조회한 모델 목록으로 역할의 CLI·모델·effort·권한·병렬 최대 세션 수·컨텍스트 한도 편집, 역할 추가·삭제
+- **설정**: 병렬 동시 수, 자동 병합, 통합 테스트 명령 등
+
+## 병렬 작업 (설계자가 세션 수를 정함)
+
+설계자는 독립적으로 나눌 수 있는 일을 턴 끝의 `duet-work` 블록으로 여러 역할 세션에 동시에 맡깁니다.
+
+```duet-work
+- id: api-login
+  role: implementer
+  task: 로그인 API 와 테스트. 인터페이스는 docs/design/auth.md
+- id: login-ui
+  role: designer
+  task: 로그인 화면 시안
+  depends_on: [api-login]
+```
+
+- 작업마다 `.duet/worktrees/<id>` git 워크트리와 **로컬 전용** 브랜치 `duet/work/<id>` 를 만듭니다.
+  출발점은 duet 을 시작할 때 체크아웃돼 있던 브랜치(예: Bitbucket 에서 배정받은 feature 브랜치)입니다.
+- 작업 흐름: 계획(읽기 전용) ⇄ 설계자 분신 검토 → 구현 → duet 이 합의 테스트 실행 + 설계자 분신 검증
+  → 기준 브랜치 최신 내용 병합(충돌은 작업자가 해결) → 통합 테스트 → 기준 브랜치에 squash 병합
+  → 워크트리·작업 브랜치 삭제. 병합 커밋 작성자는 git 설정의 사용자 본인입니다.
+- 설계자 분신: 설계자 세션을 복제해 작업마다 하나씩 붙으므로 설계자가 여러 세션과 동시에 협의합니다.
+- 세션 간 협의: 작업자는 `CONSULT <작업id|architect> <질문>` 으로 다른 작업 세션(읽기 전용 복제본)이나 설계자에게 묻습니다.
+- 동시 세션 수: 역할별 `max_sessions`(역할·모델 화면) 과 전체 `max_parallel`(기본 4) 안에서 설계자가 정합니다.
+- push 는 사람만 합니다. duet 은 원격에 아무것도 올리지 않고, `duet/work/*` push 를 막는 pre-push 훅을 넣습니다
+  (기존 pre-push 훅이 있으면 건드리지 않고 알려 줍니다). 모든 작업이 끝나면 기준 브랜치만 push 하면 됩니다.
+- 작업 기록은 `docs/work/<id>.md`, 상태는 `.duet/work.json`. 명령: `/work`, `/work cancel <id>`, `/work resume <id>`, `/work msg <id> <메시지>`
+
+## Antigravity CLI (agy)
+
+- `agy -p … --output-format stream-json` 헤드리스로 턴마다 실행하고 `--conversation` 으로 대화를 이어갑니다.
+- 헤드리스 agy 는 훅의 "허용"을 무시하는 버그가 있어, duet 은 agy 를 전체 허용으로 띄우고 작업 폴더의
+  `.agents/hooks.json` PreToolUse 훅이 duet 권한 정책에 물어 **거부할 것만 막습니다**. 이 훅은 duet 이 띄운 agy 에서만
+  동작하고(환경변수로 구분) 사람이 직접 쓰는 agy 에는 영향이 없습니다. 새로 만든 훅 파일은 `.git/info/exclude` 로 커밋에서 뺍니다.
+- 모델은 `agy models` 의 slug 를 씁니다 (예: `gemini-3.8-flash-medium`; effort 가 이름에 들어 있음).
+
+## 화면 (TUI)
 
 - 왼쪽: 대화 흐름 (사람 메시지, 각 턴 요약, 위임/보고 지시문, 승인 판정)
 - 오른쪽: 역할별 탭 — 실시간 메시지, 도구 호출, 명령 출력
