@@ -92,7 +92,7 @@ def system_append(cfg: Config, role: Role) -> str:
     if is_main:
         directives = """- `<!-- duet: DELEGATE <역할이름> -->` 와 `<!-- duet: TASK <구체적인 작업 지시> -->` : 그 역할에게 작업을 맡깁니다. 작업이 끝나면 보고가 당신에게 돌아옵니다.
 - `<!-- duet: ASK_HUMAN <질문> -->` : 자동 진행을 멈추고 사람에게 묻습니다.
-- `<!-- duet: PROPOSE_ROLE <이름> <claude|codex> <모델> <역할 설명> -->` : 새 역할 추가를 제안합니다(사람 승인 후 추가).
+- `<!-- duet: PROPOSE_ROLE <이름> <claude|codex|agy> <모델> <역할 설명> -->` : 새 역할 추가를 제안합니다(사람 승인 후 추가).
 - `<!-- duet: STATUS done -->` : 사람의 요청이 완료되었습니다.
 - 지시문이 없으면 사람에게 차례가 돌아갑니다.
 당신은 사람과 대화하는 메인 역할입니다. 사람의 요구를 설계로 바꾸고, 작업을 나눠 위임하고, 보고를 검토해 다음 단계를 정하세요.
@@ -101,6 +101,9 @@ def system_append(cfg: Config, role: Role) -> str:
         directives = f"""- `<!-- duet: REPORT done -->` 또는 `<!-- duet: REPORT blocked -->` : 작업 결과를 메인 역할({cfg.main})에게 보고합니다.
 - `<!-- duet: ASK_HUMAN <질문> -->` : 자동 진행을 멈추고 사람에게 묻습니다.
 보고에는 한 일, 바꾼 파일, 테스트 결과, 남은 문제를 구체적으로 적으세요."""
+    if is_main:
+        from .work import PARALLEL_SYSTEM
+        directives += PARALLEL_SYSTEM.replace("{max_parallel}", str(cfg.settings.get("max_parallel", 4)))
     return (common + directives + MEMORY_SYSTEM.replace("{role}", role.name)
             + (AGREEMENT_SYSTEM if cfg.mode.agreement or cfg.state.task else ""))
 

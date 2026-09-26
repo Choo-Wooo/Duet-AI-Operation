@@ -177,7 +177,9 @@ class Policy:
                 return DENY, "plan 단계에서는 읽기 도구 외의 도구를 허용하지 않습니다."
         if self.task and self.task["phase"] == "verify" and role.name == self.main_role and req.kind == "command":
             if self.verification_command(req):
-                if any(r.search(req.command or "") for r in self.human_res):
+                # 실행 파일 절대경로(/usr/bin/python3 등)는 경로 규칙에서 뺀다
+                body = re.sub(r"^\s*/\S+", "", req.command or "", count=1)
+                if any(r.search(body) for r in self.human_res):
                     return HUMAN, "합의 명령이지만 기존 위험 명령 정책에 해당합니다."
                 return AUTO, "합의된 검증 명령 (1회)"
             parts = split_commands(req.command or "")

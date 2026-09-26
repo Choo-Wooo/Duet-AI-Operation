@@ -11,10 +11,13 @@ import yaml
 
 from .agreement import EXCLUDED_DIRS, EXCLUDED_FILES, validate_task
 
-SUPPORTED_CLIS = ("claude", "codex")
+SUPPORTED_CLIS = ("claude", "codex", "agy")
 PERMISSION_PROFILES = ("read_only", "workspace_write")
 
-DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
+DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra", "agy": "gemini-3.8-flash-medium"}
+# 역할별 기본 모델 (CLI 가 있을 때)
+DESIGNER_MODEL = "claude-sonnet-5"
+RESEARCHER_MODEL = "gemini-3.8-flash-medium"
 
 
 @dataclass
@@ -26,6 +29,7 @@ class Role:
     permissions: str = "workspace_write"
     effort: str | None = None  # codex: reasoning effort, claude: effort
     context_limit: int | None = None  # 이 역할 세션의 컨텍스트 한도(토큰). 없으면 settings.context_limit_tokens
+    max_sessions: int = 1  # 병렬 작업 때 이 역할로 동시에 띄울 수 있는 세션 수 (설계자가 이 안에서 결정)
 
     def to_yaml(self) -> dict:
         d = {"cli": self.cli, "model": self.model, "brief": self.brief, "permissions": self.permissions}
@@ -33,6 +37,8 @@ class Role:
             d["effort"] = self.effort
         if self.context_limit:
             d["context_limit"] = self.context_limit
+        if self.max_sessions != 1:
+            d["max_sessions"] = self.max_sessions
         return d
 
 
@@ -140,7 +146,13 @@ class Config:
                                # 작업이 끝났을 때 이 크기 이상이면 다음 턴 전에 미리 압축
                                "compact_floor_tokens": 40000,
                                # 질문 콘솔(/ask) 세션이 이 크기를 넘으면 압축
-                               "ask_compact_tokens": 200000}
+                               "ask_compact_tokens": 200000,
+                               # 병렬 작업: 설계자 외 동시에 도는 작업 세션 수 상한
+                               "max_parallel": 4,
+                               # 병렬 작업: ACCEPT + 통합 테스트 통과 시 자동 병합 (false 면 사람 승인 후 병합)
+                               "auto_merge": True,
+                               # 병렬 작업 통합 테스트 명령 (없으면 각 작업의 test_command 를 모두 실행)
+                               "integration_test": ""}
         self.runtime: dict = {}  # 이번 실행에만 쓰는 값 (예산 등, 저장 안 함)
 
     # ---------- 로드 ----------
@@ -153,7 +165,7 @@ class Config:
         if self.settings["plan_approval"] not in ("architect", "human"):
             raise ValueError("settings.plan_approval은 architect 또는 human입니다")
         for key in ("context_limit_tokens", "prompt_max_chars", "dialogue_max_kb", "compact_floor_tokens",
-                    "ask_compact_tokens"):
+                    "ask_compact_tokens", "max_parallel"):
             if type(self.settings[key]) is not int or self.settings[key] < 0:
                 raise ValueError(f"settings.{key}는 0 이상의 정수여야 합니다 (0 = 끔)")
         excluded = self.settings["fingerprint_exclude"]
@@ -166,8 +178,13 @@ class Config:
             self.roles[name] = Role(
                 name=name, cli=r.get("cli", "claude"), model=r.get("model"), brief=r.get("brief", ""),
                 permissions=r.get("permissions", "workspace_write"), effort=r.get("effort"),
-                context_limit=r.get("context_limit"),
+                context_limit=r.get("context_limit"), max_sessions=r.get("max_sessions", 1),
             )
+            ms = self.roles[name].max_sessions
+            if type(ms) is not int or ms < 1:
+                raise ValueError(f"roles.{name}.max_sessions 는 1 이상의 정수여야 합니다")
+            if self.roles[name].cli not in SUPPORTED_CLIS:
+                raise ValueError(f"roles.{name}.cli 는 {', '.join(SUPPORTED_CLIS)} 중 하나여야 합니다")
             cl = self.roles[name].context_limit
             if cl is not None and (type(cl) is not int or cl < 0):
                 raise ValueError(f"roles.{name}.context_limit 는 0 이상의 정수여야 합니다")
@@ -206,7 +223,8 @@ class Config:
             {"main": self.main, "settings": self.settings,
              "roles": {n: r.to_yaml() for n, r in self.roles.items()}},
             "# duet 역할 설정. main 역할이 사람과 대화하고 다른 역할에게 위임합니다.\n"
-            "# cli: claude | codex, permissions: read_only | workspace_write",
+            "# cli: claude | codex | agy, permissions: read_only | workspace_write\n"
+            "# max_sessions: 병렬 작업 때 이 역할로 동시에 띄울 수 있는 세션 수",
         )
 
     def save_modes(self) -> None:
@@ -251,19 +269,36 @@ def detect_clis() -> dict[str, str]:
 
 
 def default_roles(clis: dict[str, str]) -> tuple[str, dict[str, Role]]:
-    arch_cli = "claude" if "claude" in clis else "codex"
-    impl_cli = "codex" if "codex" in clis else "claude"
+    arch_cli = "claude" if "claude" in clis else ("codex" if "codex" in clis else "agy")
+    impl_cli = "codex" if "codex" in clis else ("claude" if "claude" in clis else "agy")
     roles = {
         "architect": Role(
             "architect", arch_cli, DEFAULT_MODELS[arch_cli],
-            "사람의 요구를 설계로 바꾸고 작업을 나눠 위임한다. 구현 결과를 검토하고 구현자의 권한 요청을 심사한다. "
+            "사람의 요구를 설계로 바꾸고 작업을 나눠 위임한다. 병렬로 나눌 수 있으면 역할별 세션 수를 정해 duet-work 로 "
+            "동시에 맡긴다. 구현 결과를 검토하고 다른 역할의 권한 요청을 심사한다. "
             "코드는 직접 고치지 않고 docs/ 와 DIALOGUE.md 만 쓴다.",
             "read_only", context_limit=500000,
         ),
         "implementer": Role(
             "implementer", impl_cli, DEFAULT_MODELS[impl_cli],
             "설계와 위임받은 작업에 따라 코드를 작성하고 테스트를 통과시킨 뒤 결과를 보고한다.",
-            "workspace_write", "medium" if impl_cli == "codex" else None, context_limit=300000,
+            "workspace_write", "medium" if impl_cli == "codex" else None, context_limit=300000, max_sessions=3,
         ),
     }
+    if "claude" in clis:
+        roles["designer"] = Role(
+            "designer", "claude", DESIGNER_MODEL,
+            "화면·UX·API 형태·데이터 모델을 설계하고 시안(docs/design/, 목업 코드, 스타일)을 만든다. "
+            "구현자와 인터페이스를 맞추고, 결정 근거를 문서로 남긴다.",
+            "workspace_write", context_limit=300000, max_sessions=2,
+        )
+    researcher_cli = "agy" if "agy" in clis else ("claude" if "claude" in clis else None)
+    if researcher_cli:
+        roles["researcher"] = Role(
+            "researcher", researcher_cli,
+            RESEARCHER_MODEL if researcher_cli == "agy" else DEFAULT_MODELS[researcher_cli],
+            "라이브러리·API·선행 사례·코드베이스를 조사해 근거와 출처가 있는 보고서를 docs/research/ 에 쓴다. "
+            "코드는 고치지 않는다.",
+            "read_only", context_limit=300000, max_sessions=2,
+        )
     return "architect", roles

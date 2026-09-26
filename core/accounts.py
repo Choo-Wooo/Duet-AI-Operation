@@ -95,12 +95,23 @@ async def _codex_account() -> str:
     return f"경고: Codex 계정 유형 {t} — 구독이 아닐 수 있습니다."
 
 
+async def _agy_account() -> str:
+    from .models import agy_models
+    try:
+        models = await agy_models()
+    except Exception as e:
+        return f"경고: Antigravity(agy) 로그인을 확인하지 못했습니다 ({e}). 터미널에서 agy 를 실행해 로그인하세요."
+    return f"Antigravity(agy): 로그인됨 · 모델 {len(models)}개 (구독)"
+
+
 async def _probe(clis: list[str], timeout: float) -> list[str]:
     jobs = []
     if "claude" in clis:
         jobs.append(("Claude", _claude_account()))
     if "codex" in clis:
         jobs.append(("Codex", _codex_account()))
+    if "agy" in clis:
+        jobs.append(("Antigravity", _agy_account()))
     out = []
     results = await asyncio.gather(*(asyncio.wait_for(j, timeout) for _, j in jobs), return_exceptions=True)
     for (name, _), r in zip(jobs, results):

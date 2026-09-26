@@ -41,11 +41,12 @@ def setup_project(duet_dir: Path, project: Path, fake: bool) -> tuple[Config, li
     clis = detect_clis()
     if not cfg.roles_file.exists():
         if fake:
-            clis = {"claude": "fake", "codex": "fake"}
+            clis = {"claude": "fake", "codex": "fake", "agy": "fake"}
         if not clis:
-            print("[duet] claude 또는 codex CLI 를 찾지 못했습니다. 하나 이상 설치하고 로그인한 뒤 다시 실행하세요.")
+            print("[duet] claude / codex / agy CLI 를 찾지 못했습니다. 하나 이상 설치하고 로그인한 뒤 다시 실행하세요.")
             print("  Claude Code: npm i -g @anthropic-ai/claude-code   (또는 https://claude.com/claude-code)")
             print("  Codex CLI  : npm i -g @openai/codex")
+            print("  Antigravity: https://antigravity.google (agy)")
             sys.exit(2)
         cfg.main, cfg.roles = default_roles(clis)
         cfg.save_roles()

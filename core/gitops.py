@@ -37,7 +37,8 @@ class Git:
     def ensure_gitignore(self, duet_dirname: str) -> None:
         gi = self.project / ".gitignore"
         lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
-        want = [f"/{duet_dirname}/", ".duet/venv/", ".duet/logs/", ".duet/state.json", ".duet/saves/"]
+        want = [f"/{duet_dirname}/", ".duet/venv/", ".duet/logs/", ".duet/state.json", ".duet/saves/",
+                ".duet/worktrees/", ".duet/work.json", ".duet/models.json", ".duet/web.json"]
         add = [w for w in want if w not in lines]
         if add:
             block = ("\n" if lines and lines[-1].strip() else "") + "# duet\n" + "\n".join(add) + "\n"

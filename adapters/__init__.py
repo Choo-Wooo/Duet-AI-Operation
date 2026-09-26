@@ -19,6 +19,9 @@ def make_adapter(role: Role, project: Path, bus: EventBus, approver: Approver | 
     if role.cli == "codex":
         from .codex import CodexAdapter
         return CodexAdapter(role, project, bus, approver, session_id, system_append, reviewer, fork_session)
+    if role.cli == "agy":
+        from .agy import AgyAdapter
+        return AgyAdapter(role, project, bus, approver, session_id, system_append, reviewer, fork_session)
     raise ValueError(f"지원하지 않는 CLI: {role.cli}")
 
 

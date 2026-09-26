@@ -35,6 +35,10 @@ class FakeAdapter(AgentAdapter):
                 if "rm -rf" in prompt:
                     return TurnResult('{"decision": "deny", "reason": "삭제 대신 build 폴더를 무시하세요."}')
                 return TurnResult('{"decision": "allow", "reason": "테스트용 허용", "scope": "once"}')
+            if (self.turn_kind or "").startswith("work_"):
+                body = await self._work_turn(prompt)
+                self.emit("text", text=body.split("<!--")[0].strip())
+                return TurnResult(body, full_text=body, tokens=321)
             m = re.search(r"턴 #(\d+)", prompt)
             n = int(m.group(1)) if m else self.dialogue.max_number() + 1
             if self.plan_read_only:
@@ -68,12 +72,49 @@ class FakeAdapter(AgentAdapter):
         await self._step("tool", name="Read", detail="Read DIALOGUE.md")
         if "보고(" in prompt:
             return "구현 보고를 확인했습니다. 요청이 완료되었습니다.\n<!-- duet: STATUS done -->"
+        if "사람의 새 메시지" in prompt and "병렬" in self._last_human():
+            return ("작업을 둘로 나눠 동시에 맡깁니다.\n```duet-work\n"
+                    "- id: api\n  role: implementer\n  task: api.txt 를 만든다\n"
+                    "- id: ui\n  role: implementer\n  task: ui.txt 를 만든다\n  depends_on: [api]\n```")
+        if "병렬 작업 보고" in prompt:
+            return "병렬 작업 결과를 확인했습니다.\n<!-- duet: STATUS done -->"
         if "사람의 새 메시지" in prompt:
             await self._step("tool", name="Write", detail="Write docs/design.md")
             return ("요청을 설계했습니다(docs/design.md). 구현을 맡깁니다.\n"
                     "<!-- duet: DELEGATE implementer -->\n"
                     "<!-- duet: TASK src/app.py 에 hello() 함수를 만들고 테스트를 추가하라 -->")
         return "확인했습니다."
+
+    def _last_human(self) -> str:
+        turns = [t for t in self.dialogue.turns() if t.role == "human"] if hasattr(self.dialogue, "turns") else []
+        if turns:
+            return turns[-1].body
+        text = self.dialogue.read() if hasattr(self.dialogue, "read") else ""
+        return text[-400:]
+
+    async def _work_turn(self, prompt: str) -> str:
+        """병렬 작업 흐름용 응답 (계획·검토·구현·검증·협의)."""
+        await asyncio.sleep(DELAY / 4)
+        kind = self.turn_kind
+        wid = re.search(r"병렬 작업 ([a-z0-9-]+)", prompt)
+        wid = wid.group(1) if wid else "work"
+        if kind == "work_plan":
+            return (f"### 이해한 요구\n{wid}.txt 를 만든다\n```files\n{wid}.txt\n```\n### AC\nAC1 파일 존재\n"
+                    f"test_command: test -f {wid}.txt\n<!-- duet: PLAN ready -->")
+        if kind == "work_review":
+            return "계획이 적절합니다.\n<!-- duet: AGREE -->"
+        if kind == "work_implement":
+            if "CONSULT 답변" not in prompt and "consult" in wid:
+                return "인터페이스를 확인하겠습니다.\n<!-- duet: CONSULT architect 파일 이름 규칙은? -->"
+            path = self.project / f"{wid}.txt"
+            req = ApprovalRequest(self.role.name, "file", f"Write {wid}.txt", paths=[str(path)])
+            d = await self.approve(req)
+            if d.allow:
+                path.write_text(f"{wid}\n")
+            return f"{wid}.txt 를 만들었습니다.\n<!-- duet: REPORT done -->"
+        if kind == "work_verify":
+            return "검토 완료.\n<!-- duet: ACCEPT -->"
+        return "파일 이름은 작업 id 를 씁니다."
 
     async def _worker_turn(self) -> str:
         await self._step("tool", name="Read", detail="Read docs/design.md")

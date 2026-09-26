@@ -20,6 +20,7 @@ from .prompts import compact_instructions, opinion_prompt, review_prompt, system
 from .textutil import extract_memory, save_memory, summarize_paths
 from .ui import HumanUI
 from .saves import delete_save, git_head, list_saves, read_save, write_save
+from .work import REPORT_TRIGGER, WorkBoard, parse_work_block
 
 Next = tuple[str, str, str]  # (role, kind, info)
 
@@ -84,12 +85,14 @@ class Orchestrator:
         self._compacted_at: dict[str, int] = {}
         self._compact_due: set[str] = set()  # 작업 경계에서 미리 압축할 역할
         self._compact_forced: set[str] = set()  # 사람이 /compact 로 요청한 역할
+        self._pending_report = False  # 병렬 작업 보고를 메인에게 전달해야 함
         self.budget_usd: float | None = cfg.runtime.get("budget_usd")
         self.max_hours: float | None = cfg.runtime.get("max_hours")
         if cfg.state.task:
             cfg.state.task["waiting"] = True
             cfg.state.task["wait_reason"] = cfg.state.task["wait_reason"] or "재시작 후 메인의 재개 판단 대기"
         self.policy.task = cfg.state.task
+        self.work = WorkBoard(self)
         bus.subscribe(self._on_event)
 
     # ================= 상태 =================
@@ -119,6 +122,8 @@ class Orchestrator:
             "task": ({k: self.cfg.state.task[k] for k in ("id", "phase", "plan_path", "submitted_version",
                        "agreed_version", "rounds", "waiting")} if self.cfg.state.task else None),
             "task_summary": task_status(self.cfg.state.task),
+            "work": self.work.snapshot() if hasattr(self, "work") else [],
+            "work_base": getattr(getattr(self, "work", None), "base", None),
         }
 
     def emit_status(self) -> None:
@@ -185,6 +190,10 @@ class Orchestrator:
 
     async def close(self) -> None:
         try:
+            await self.work.close()
+        except Exception:
+            pass
+        try:
             from ..ask import stop_all
             stop_all(self.project)
         except Exception:
@@ -198,10 +207,22 @@ class Orchestrator:
         self.reviewer = None
 
     # ================= 권한 =================
-    async def handle_approval(self, req: ApprovalRequest) -> Decision:
-        role = self.cfg.roles.get(req.role) or Role(req.role, "claude")
-        self.policy.task = self.cfg.state.task
-        tier, reason = self.policy.classify(req, role)
+    def role_for(self, name: str) -> Role:
+        """세션 이름(architect#id, implementer#id 포함)에 해당하는 역할 설정."""
+        if name in self.cfg.roles:
+            return self.cfg.roles[name]
+        base = name.split("#", 1)[0]
+        if base in self.cfg.roles:
+            from dataclasses import replace
+            return replace(self.cfg.roles[base], name=name)
+        return Role(name, "claude", permissions="read_only")
+
+    async def handle_approval(self, req: ApprovalRequest, policy: Policy | None = None) -> Decision:
+        role = self.role_for(req.role)
+        if policy is None:
+            policy = self.policy
+            self.policy.task = self.cfg.state.task
+        tier, reason = policy.classify(req, role)
         opinion = None
         if tier == AUTO:
             d = Decision(True, reason, by="auto")
@@ -215,10 +236,10 @@ class Orchestrator:
             if self.cfg.policy.get("ask_architect_opinion_for_human", True) and req.role != self.cfg.main:
                 _, opinion = await self._ask_architect(req, reason, opinion_only=True)
             d = await self._ask_human(req, reason, opinion)
-        if self.policy.verification_command(req):
+        if policy.verification_command(req):
             d.scope = "once"
         if d.allow and d.scope == "session":
-            self.policy.remember(req)
+            policy.remember(req)
         self.bus.emit("approval", req.role, summary=req.summary, tier=tier, allow=d.allow, by=d.by,
                       reason=d.reason)
         if tier != AUTO:
@@ -298,6 +319,9 @@ class Orchestrator:
     def _drain_inbox(self, nxt: Next | None) -> Next | None:
         while not self.inbox.empty():
             to, text = self.inbox.get_nowait()
+            if text == REPORT_TRIGGER:
+                self._pending_report = True
+                continue
             n = self._append_human(to, text)
             target = to if to in self.cfg.roles else self.cfg.main
             if self.cfg.state.task:
@@ -311,18 +335,26 @@ class Orchestrator:
         """사람 메시지를 기다렸다가 요청 단위로 진행한다 (TUI 워커로 실행)."""
         self.emit_status()
         while True:
-            to, text = await self.inbox.get()
+            if self._pending_report:
+                to, text = None, REPORT_TRIGGER
+            else:
+                to, text = await self.inbox.get()
             self._input_pending = True
             await self._session_ready.wait()
             self._input_pending = False
-            n = self._append_human(to, text)
-            target = to if to in self.cfg.roles else self.cfg.main
-            if self.cfg.state.task:
-                if not self.cfg.state.task["waiting"]:
-                    self._wait_task("사람 메시지에 대한 메인의 판단 대기")
-                target = self.cfg.main
+            if text == REPORT_TRIGGER:
+                self._pending_report = False
+                first: Next = (self.cfg.main, "system", self.work.report_prompt())
+            else:
+                n = self._append_human(to, text)
+                target = to if to in self.cfg.roles else self.cfg.main
+                if self.cfg.state.task:
+                    if not self.cfg.state.task["waiting"]:
+                        self._wait_task("사람 메시지에 대한 메인의 판단 대기")
+                    target = self.cfg.main
+                first = (target, "human", str(n))
             try:
-                await self.run((target, "human", str(n)))
+                await self.run(first)
             except Exception as e:  # 예기치 못한 오류도 루프는 유지
                 self.bus.emit("error", None, text=f"진행 중 오류: {type(e).__name__}: {e}")
             finally:
@@ -700,9 +732,24 @@ class Orchestrator:
             return None
         main = self.cfg.main
         if role == main:
+            for msg in self.work.handle_directives(turn.directives):
+                self.notice(msg)
+            try:
+                specs = parse_work_block(tr.full_text or tr.text) or parse_work_block(turn.body)
+            except Exception as e:
+                return (main, "system", f"duet-work 블록을 해석하지 못했습니다: {e}. YAML 목록 형식으로 다시 내세요.")
+            if specs is not None:
+                errors = self.work.submit(specs, turn.n)
+                if errors:
+                    return (main, "system", "duet-work 블록을 받을 수 없습니다:\n- " + "\n- ".join(errors)
+                            + "\n고쳐서 다시 내거나, 순차 진행이면 DELEGATE 를 쓰세요.")
+                return None  # 작업들은 백그라운드에서 진행되고, 끝나면 보고가 돌아온다
             d = turn.directive("DELEGATE")
             if d is None:
                 return None
+            if self.work.busy():
+                return (main, "system", "병렬 작업이 진행 중이라 DELEGATE 를 받을 수 없습니다 (메인 작업 트리 충돌 방지). "
+                        "추가 작업은 duet-work 블록으로 내거나, 병렬 작업이 끝난 뒤 위임하세요.")
             target = d.split()[0] if d.split() else ""
             if target not in self.cfg.roles or target == main:
                 others = ", ".join(r for r in self.cfg.roles if r != main) or "(없음)"
@@ -1047,10 +1094,20 @@ class Orchestrator:
             if name in self.adapters:
                 self.adapters[name].context_limit = self.context_limit(name)
             return f"{name}.context_limit = {self.context_limit(name):,} 토큰"
+        if field == "max_sessions":
+            try:
+                n = int(value)
+                assert n >= 1
+            except (ValueError, AssertionError):
+                return "max_sessions 는 1 이상의 정수입니다"
+            r.max_sessions = n
+            self.cfg.save_roles()
+            self.emit_status()
+            return f"{name}.max_sessions = {n} (병렬 작업 동시 세션 수)"
         if field not in ("cli", "model", "brief", "permissions", "effort"):
-            return "바꿀 수 있는 항목: cli, model, brief, permissions, effort, context_limit"
+            return "바꿀 수 있는 항목: cli, model, brief, permissions, effort, context_limit, max_sessions"
         if field == "cli" and value not in SUPPORTED_CLIS:
-            return "cli 는 claude 또는 codex"
+            return "cli 는 " + " / ".join(SUPPORTED_CLIS)
         setattr(r, field, value or None)
         if self.cfg.state.task and self.cfg.state.task["role"] == name and field in ("cli", "model", "permissions"):
             self._wait_task(f"작업자 {name}의 {field} 설정이 바뀌었습니다. 메인이 재개 여부를 판단하세요.")

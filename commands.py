@@ -14,8 +14,8 @@ HELP = """명령어
   /turns <N|inf>            이번 요청의 턴 한도 (inf = 무제한)
   /auto on|off              off 면 위임 전마다 확인
   /role list                역할 목록
-  /role add <이름> <claude|codex> <모델> <설명…>
-  /role edit <이름> <항목>=<값>   (cli, model, brief, permissions, effort, context_limit)
+  /role add <이름> <claude|codex|agy> <모델> <설명…>
+  /role edit <이름> <항목>=<값>   (cli, model, brief, permissions, effort, context_limit, max_sessions)
   /ask [역할]               새 창에 질문 콘솔 열기 (기본 설계자, 본 작업과 분리된 읽기 전용 분신)
   /memory [역할]            역할의 작업 기억 파일 보기
   /compact [역할]           다음 턴 전에 그 역할 대화 압축 예약
@@ -28,6 +28,9 @@ HELP = """명령어
   /save-delete <이름>        저장본 삭제
   /status                   상태 보기
   /plan                     현재 합의 계획서 경로·버전·단계 보기
+  /work                     병렬 작업 보드 보기
+  /work cancel <id> [사유]   병렬 작업 취소   /work resume <id>  대기 작업 재개
+  /work msg <id> <메시지>    병렬 작업 세션에 메시지 (다음 턴에 전달)
   /quit                     종료"""
 
 
@@ -121,7 +124,7 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
         if sub == "add":
             parts = args.split(None, 3)
             if len(parts) < 2 or parts[1] not in SUPPORTED_CLIS:
-                return "사용법: /role add <이름> <claude|codex> <모델> <설명…>"
+                return "사용법: /role add <이름> <claude|codex|agy> <모델> <설명…>"
             if parts[0] in orch.cfg.roles:
                 return f"'{parts[0]}' 역할이 이미 있습니다."
             orch.add_role(Role(parts[0], parts[1], parts[2] if len(parts) > 2 else None,
@@ -170,6 +173,18 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
             return "역할: " + ", ".join(orch.cfg.roles)
         orch._compact_forced.add(role)
         return f"{role}: 다음 턴 전에 대화를 압축합니다."
+    if cmd == "work":
+        sub, _, arg = rest.partition(" ")
+        if not sub:
+            return f"병렬 작업 (기준 브랜치 {orch.work.base or '-'})\n" + orch.work.summary()
+        wid, _, text = arg.strip().partition(" ")
+        if sub == "cancel" and wid:
+            return orch.work.cancel(wid, text or "사람이 취소")
+        if sub == "resume" and wid:
+            return orch.work.resume(wid)
+        if sub == "msg" and wid and text:
+            return orch.work.message(wid, text)
+        return "사용법: /work | /work cancel <id> [사유] | /work resume <id> | /work msg <id> <메시지>"
     if cmd == "status":
         return _fmt_status(orch)
     if cmd == "plan":

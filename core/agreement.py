@@ -16,7 +16,7 @@ EXCLUDED_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", "DIALOG
 EXCLUDED_FILES = {".DS_Store"}
 # (경로, 크기, 수정시각, inode) → sha256. 바뀌지 않은 큰 파일(월드·맵 등)을 매번 다시 읽지 않도록.
 _HASH_CACHE: dict[tuple, str] = {}
-DUET_RUNTIME = {"venv", "logs", "saves", "memory", "reports", "asks"}
+DUET_RUNTIME = {"venv", "logs", "saves", "memory", "reports", "asks", "worktrees"}
 
 
 def new_task(role: str, instruction: str, base_commit: str | None, baseline: dict) -> dict:
