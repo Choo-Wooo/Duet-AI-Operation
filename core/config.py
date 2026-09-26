@@ -263,7 +263,7 @@ def default_roles(clis: dict[str, str]) -> tuple[str, dict[str, Role]]:
         "implementer": Role(
             "implementer", impl_cli, DEFAULT_MODELS[impl_cli],
             "설계와 위임받은 작업에 따라 코드를 작성하고 테스트를 통과시킨 뒤 결과를 보고한다.",
-            "workspace_write", "high" if impl_cli == "codex" else None, context_limit=300000,
+            "workspace_write", "medium" if impl_cli == "codex" else None, context_limit=300000,
         ),
     }
     return "architect", roles
