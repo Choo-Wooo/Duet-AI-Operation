@@ -157,3 +157,22 @@ def test_plan_read_only_denies_writes_in_hook(tmp_path, fake_agy):
         await ad.close()
     asyncio.run(go())
     assert [r.tool for r in seen] == ["Read"]  # 명령·쓰기는 정책까지 가지 않고 훅에서 거부
+
+
+def test_switches_to_safe_mode_when_hook_not_called(tmp_path, fake_agy, monkeypatch):
+    async def approver(req):
+        return Decision(True, "ok")
+
+    async def go():
+        ad = AgyAdapter(Role("researcher", "agy"), tmp_path, EventBus(), approver, None, "")
+        await ad.start()
+        # 훅 설정을 지워 agy 가 훅을 부르지 못하게 한다 (가짜 agy 는 명령을 그대로 호출)
+        (tmp_path / ".agents" / "hooks.json").write_text('{"duet-policy": {"PreToolUse": [{"hooks": [{"command": "true"}]}]}}')
+        await ad.run_turn("x")
+        mode = ad.safe_mode
+        await ad.run_turn("y")
+        await ad.close()
+        return mode
+    assert asyncio.run(go()) is True
+    calls = [json.loads(l) for l in fake_agy.read_text().splitlines()]
+    assert "--dangerously-skip-permissions" in calls[0] and "--dangerously-skip-permissions" not in calls[1]

@@ -140,7 +140,10 @@ class AgyAdapter(AgentAdapter):
         self._server = await asyncio.start_unix_server(self._on_hook, path=self._sock)
         install_hook(self.project)
         self._system_sent = bool(self.session_id)
-        self._cost_tokens = 0
+        self._hook_calls = 0
+        self._tool_steps = 0
+        # 훅이 실제로 불리는지 확인되기 전까지는 전체 허용 모드로 띄우되, 불리지 않으면 안전 모드로 바꾼다
+        self.safe_mode = False
 
     # ---------------- 훅 브리지 ----------------
     async def _on_hook(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -148,6 +151,7 @@ class AgyAdapter(AgentAdapter):
         try:
             line = await reader.readline()
             msg = json.loads(line.decode() or "{}")
+            self._hook_calls += 1
             if msg.get("token") != self._token:
                 answer = {"decision": "deny", "reason": "duet 훅 토큰 불일치"}
             else:
@@ -174,7 +178,9 @@ class AgyAdapter(AgentAdapter):
 
     # ---------------- 턴 ----------------
     def _argv(self, prompt: str) -> list[str]:
-        argv = [self.exe, "-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions"]
+        argv = [self.exe, "-p", prompt, "--output-format", "stream-json"]
+        if not self.safe_mode:
+            argv.append("--dangerously-skip-permissions")
         if self.session_id:
             argv += ["--conversation", self.session_id]
         if self.role.model:
@@ -191,6 +197,7 @@ class AgyAdapter(AgentAdapter):
         result = TurnResult(text="")
         texts: list[str] = []
         partial: dict[int, list[str]] = {}
+        self._hook_calls = self._tool_steps = 0
         env = {**os.environ, "DUET_AGY_BRIDGE": self._sock, "DUET_AGY_TOKEN": self._token}
         try:
             self.proc = await asyncio.create_subprocess_exec(
@@ -218,6 +225,12 @@ class AgyAdapter(AgentAdapter):
                     final = ev.get("result") or {}
             rc = await self.proc.wait()
             await err_task
+            if self._tool_steps and not self._hook_calls and not self.safe_mode:
+                # 전체 허용으로 띄웠는데 duet 훅이 한 번도 불리지 않았다 → 정책이 적용되지 않은 것
+                self.safe_mode = True
+                self.emit("notice", level="warn",
+                          text="agy 가 duet 권한 훅을 부르지 않았습니다. 다음 턴부터 agy 를 기본 권한 모드로 띄웁니다 "
+                               "(헤드리스에서 명령 실행·파일 쓰기가 자동 거부될 수 있음). .agents/hooks.json 을 확인하세요.")
             if final is None:
                 result.ok = False
                 tail = "\n".join(list(self._stderr)[-5:])
@@ -282,6 +295,7 @@ class AgyAdapter(AgentAdapter):
             name = st.get("tool_name") or info.get("name") or "tool"
             params = info.get("parameters") or {}
             if state == "ACTIVE":
+                self._tool_steps += 1
                 self.emit("tool", name=name, detail=_detail(name, params))
             elif state in ("DONE", "ERROR"):
                 err = info.get("error") or {}
