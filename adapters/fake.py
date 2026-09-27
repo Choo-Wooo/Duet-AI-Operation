@@ -41,6 +41,12 @@ class FakeAdapter(AgentAdapter):
                 return TurnResult(body, full_text=body, tokens=321)
             m = re.search(r"턴 #(\d+)", prompt)
             n = int(m.group(1)) if m else self.dialogue.max_number() + 1
+            if self.role.name.startswith("질문:"):  # 웹 질문 패널
+                await self._step("tool", name="Read", detail="Read docs/design")
+                q = prompt.split("질문:")[-1].strip()
+                body = (f"(가짜 에이전트 답변) '{q[:80]}' 에 대한 답입니다. 실제 실행에서는 역할 세션을 복제한 읽기 전용 "
+                        "분신이 설계 문서와 코드를 읽고 근거와 함께 답합니다.")
+                return TurnResult(body, full_text=body)
             if self.plan_read_only:
                 await self._step("tool", name="Read", detail="Read DIALOGUE.md")
                 body = ("### 이해한 요구\nhello 함수를 추가합니다.\n### 설계와 다른 점\n없음\n"
@@ -73,9 +79,14 @@ class FakeAdapter(AgentAdapter):
         if "보고(" in prompt:
             return "구현 보고를 확인했습니다. 요청이 완료되었습니다.\n<!-- duet: STATUS done -->"
         if "사람의 새 메시지" in prompt and "병렬" in self._last_human():
-            return ("작업을 둘로 나눠 동시에 맡깁니다.\n```duet-work\n"
-                    "- id: api\n  role: implementer\n  task: api.txt 를 만든다\n"
-                    "- id: ui\n  role: implementer\n  task: ui.txt 를 만든다\n  depends_on: [api]\n```")
+            items = ["- id: api\n  role: implementer\n  task: api.txt 를 만든다\n",
+                     "- id: ui\n  role: implementer\n  task: ui.txt 를 만든다\n  depends_on: [api]\n"]
+            if "- designer" in prompt:  # 데모: 팀에 디자이너·리서처가 있으면 함께 나눈다
+                items[1] = "- id: ui\n  role: designer\n  task: ui.txt 에 화면 시안을 만든다\n  depends_on: [api]\n"
+                items.append("- id: db\n  role: implementer\n  task: db.txt 를 만든다\n")
+            if "- researcher" in prompt:
+                items.append("- id: survey\n  role: researcher\n  task: survey.txt 에 조사 결과를 쓴다\n")
+            return (f"작업을 {len(items)}개로 나눠 동시에 맡깁니다.\n```duet-work\n" + "".join(items) + "```")
         if "병렬 작업 보고" in prompt:
             return "병렬 작업 결과를 확인했습니다.\n<!-- duet: STATUS done -->"
         if "사람의 새 메시지" in prompt:
@@ -94,24 +105,27 @@ class FakeAdapter(AgentAdapter):
 
     async def _work_turn(self, prompt: str) -> str:
         """병렬 작업 흐름용 응답 (계획·검토·구현·검증·협의)."""
-        await asyncio.sleep(DELAY / 4)
+        await asyncio.sleep(float(os.environ.get("DUET_FAKE_WORK_DELAY", DELAY / 4)))
         kind = self.turn_kind
         wid = re.search(r"병렬 작업 ([a-z0-9-]+)", prompt)
         wid = wid.group(1) if wid else "work"
+        # 읽기 전용 역할(리서처)은 docs/ 아래에만 쓴다
+        rel = f"docs/research/{wid}.md" if self.role.permissions == "read_only" else f"{wid}.txt"
         if kind == "work_plan":
-            return (f"### 이해한 요구\n{wid}.txt 를 만든다\n```files\n{wid}.txt\n```\n### AC\nAC1 파일 존재\n"
-                    f"test_command: test -f {wid}.txt\n<!-- duet: PLAN ready -->")
+            return (f"### 이해한 요구\n{rel} 를 만든다\n```files\n{rel}\n```\n### AC\nAC1 파일 존재\n"
+                    f"test_command: test -f {rel}\n<!-- duet: PLAN ready -->")
         if kind == "work_review":
             return "계획이 적절합니다.\n<!-- duet: AGREE -->"
         if kind == "work_implement":
             if "CONSULT 답변" not in prompt and "consult" in wid:
                 return "인터페이스를 확인하겠습니다.\n<!-- duet: CONSULT architect 파일 이름 규칙은? -->"
-            path = self.project / f"{wid}.txt"
-            req = ApprovalRequest(self.role.name, "file", f"Write {wid}.txt", paths=[str(path)])
+            path = self.project / rel
+            req = ApprovalRequest(self.role.name, "file", f"Write {rel}", paths=[str(path)])
             d = await self.approve(req)
             if d.allow:
+                path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(f"{wid}\n")
-            return f"{wid}.txt 를 만들었습니다.\n<!-- duet: REPORT done -->"
+            return f"{rel} 를 만들었습니다.\n<!-- duet: REPORT done -->"
         if kind == "work_verify":
             return "검토 완료.\n<!-- duet: ACCEPT -->"
         return "파일 이름은 작업 id 를 씁니다."

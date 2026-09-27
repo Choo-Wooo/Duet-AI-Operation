@@ -177,7 +177,9 @@ class Config:
                                # 병렬 작업: ACCEPT + 통합 테스트 통과 시 자동 병합 (false 면 사람 승인 후 병합)
                                "auto_merge": True,
                                # 병렬 작업 통합 테스트 명령 (없으면 각 작업의 test_command 를 모두 실행)
-                               "integration_test": ""}
+                               "integration_test": "",
+                               # 병렬 작업 테스트 시간 한도(초)
+                               "work_test_timeout": 900}
         self.runtime: dict = {}  # 이번 실행에만 쓰는 값 (예산 등, 저장 안 함)
 
     # ---------- 로드 ----------
