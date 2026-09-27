@@ -13,6 +13,7 @@ HELP = """명령어
   /mode [이름]               대화 모드 보기/변경 (sprint, review, deliberate, autopilot=전권 자동)
   /turns <N|inf>            이번 요청의 턴 한도 (inf = 무제한)
   /auto on|off              off 면 위임 전마다 확인
+  /autopilot on|off         전권 자동 수락 (승인·선택을 묻지 않음, push·sudo·시스템 삭제·배포만 막음)
   /role list                역할 목록
   /role add <이름> <claude|codex|agy> <모델> <설명…>
   /role edit <이름> <항목>=<값>   (cli, model, brief, permissions, effort, context_limit, max_sessions)
@@ -113,6 +114,10 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
         if rest.isdigit():
             return orch.set_max_turns(int(rest))
         return "사용법: /turns <숫자|inf>"
+    if cmd == "autopilot":
+        if rest in ("on", "off"):
+            return orch.set_full_auto(rest == "on")
+        return f"전권 자동 수락: {'켜짐' if orch.cfg.settings.get('full_auto') else '꺼짐'}  (사용법: /autopilot on|off)"
     if cmd == "auto":
         if rest in ("on", "off"):
             return orch.set_auto(rest == "on")

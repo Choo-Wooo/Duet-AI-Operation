@@ -179,7 +179,9 @@ class Config:
                                # 병렬 작업 통합 테스트 명령 (없으면 각 작업의 test_command 를 모두 실행)
                                "integration_test": "",
                                # 병렬 작업 테스트 시간 한도(초)
-                               "work_test_timeout": 900}
+                               "work_test_timeout": 900,
+                               # 전권 자동 수락: 모드와 상관없이 승인·선택을 사람에게 묻지 않음 (autopilot_deny 만 막음)
+                               "full_auto": False}
         self.runtime: dict = {}  # 이번 실행에만 쓰는 값 (예산 등, 저장 안 함)
 
     # ---------- 로드 ----------

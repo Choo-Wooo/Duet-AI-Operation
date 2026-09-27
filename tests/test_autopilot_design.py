@@ -216,3 +216,31 @@ def test_agy_designer_browser_allowed_in_plan(tmp_path):
     assert p.classify(to_request("designer", "capture_browser_screenshot", {}), r)[0] == AUTO
     r2 = preset_role("researcher", {"agy": 1})
     assert Policy(tmp_path, DEFAULT_POLICY, "architect").classify(to_request("researcher", "search_web", {"query": "x"}), r2)[0] == AUTO
+
+
+def test_full_auto_setting_independent_of_mode(tmp_path):
+    orch, ui = make(tmp_path, "review")
+    assert not orch.full_auto
+    orch.set_full_auto(True)
+    assert orch.full_auto and Config(tmp_path).dir.joinpath("roles.yaml").read_text().count("full_auto: true")
+
+    async def go():
+        return await orch.handle_approval(ApprovalRequest("implementer", "command", "rm -rf b", command="rm -rf b"))
+    assert asyncio.run(go()).allow and ui.asked == []
+    orch.set_full_auto(False)
+    assert not orch.full_auto
+
+
+def test_web_full_auto_setting(tmp_path):
+    from duet.web.server import WebUI
+    cfg = Config(tmp_path)
+    cfg.dir.mkdir()
+    cfg.roles = {"architect": Role("architect", "claude", permissions="read_only")}
+    cfg.settings["git_snapshots"] = False
+    cfg.save_roles()
+    cfg.save_state()
+    Dialogue(tmp_path).ensure()
+    w = WebUI(cfg, EventBus(), [], True, "t")
+    out = asyncio.run(w.handle({"type": "setting", "key": "full_auto", "value": True}))
+    assert "켰습니다" in out["text"] and out["state"]["status"]["full_auto"] and out["state"]["settings"]["full_auto"] is True
+    asyncio.run(w.orch.close())

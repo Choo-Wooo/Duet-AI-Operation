@@ -31,6 +31,7 @@ REPLAY = 3000
 
 # 웹에서 바꿀 수 있는 설정: 키 → (형 변환, 검사, 설명)
 SETTINGS: dict[str, tuple[Any, Any, str]] = {
+    "full_auto": (bool, None, "전권 자동 수락: 승인·선택을 사람에게 묻지 않고 끝까지 진행 (git push·sudo·시스템 삭제·배포만 막음)"),
     "max_parallel": (int, lambda v: 1 <= v <= 32, "병렬 작업 동시 세션 수 상한 (설계자 제외)"),
     "auto_merge": (bool, None, "ACCEPT + 통합 테스트 통과 시 자동 병합 (끄면 사람 승인)"),
     "integration_test": (str, None, "병합 전 통합 테스트 명령 (비우면 작업별 test_command)"),
@@ -323,6 +324,8 @@ class WebUI:
             return {"type": "output", "text": f"{key}: 형식이 맞지 않습니다"}
         if check and not check(value):
             return {"type": "output", "text": f"{key}: 허용 범위를 벗어났습니다"}
+        if key == "full_auto":
+            return {"type": "output", "text": self.orch.set_full_auto(bool(value)), "state": self.state()}
         self.cfg.settings[key] = value
         self.cfg.save_roles()
         if key == "git_snapshots":

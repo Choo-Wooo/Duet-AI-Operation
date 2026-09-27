@@ -292,12 +292,17 @@ flowchart LR
 
 ### 전권 자동 모드
 
-`autopilot` 모드는 사람이 모든 권한을 위임한 상태로 끝까지 진행합니다. 웹 UI 상단의 모드 선택, `/mode autopilot`, `--mode autopilot`으로 켭니다.
+전권 자동은 사람이 모든 권한을 위임한 상태로 끝까지 진행하는 기능입니다. 두 가지 방법으로 켭니다.
+
+- **설정의 자동 수락 스위치**: 웹 UI 설정 화면 맨 위의 "전권 자동 수락"을 켜거나 `/autopilot on`을 입력합니다. 지금 쓰는 대화 모드(review, deliberate 등)는 그대로 두고 승인·선택만 자동으로 처리합니다.
+- **autopilot 모드**: 모드 자체를 `autopilot`(턴 무제한, 스스로 결정하는 진행 방식)으로 바꿉니다. 웹 UI 상단의 모드 선택, `/mode autopilot`, `--mode autopilot`으로 켭니다.
+
+켜져 있는 동안의 동작은 같습니다.
 
 - 사람·설계자 확인이 필요하던 요청도 자동 허용합니다. 단 `policy.yaml`의 `autopilot_deny`(기본: `git push`, `sudo`, `/`·`~` 통째 삭제, `mkfs`·`dd`, 패키지 배포)는 막습니다.
 - 턴 한도, 합의 라운드, 병합 확인 같은 선택은 진행 쪽으로 자동으로 고릅니다. 같은 질문이 다섯 번 넘게 반복되면 멈추고, 사람이 정한 예산 한도는 지킵니다.
 - 작업자의 질문(`ASK_HUMAN`, `REPORT blocked`)은 설계자가 사람 대신 판단합니다. 설계자 자신의 질문만 사람에게 옵니다.
-- 켜져 있는 동안 웹 UI 상단에 "전권 자동" 표시가 나타납니다.
+- 켜져 있는 동안 웹 UI 상단에 "전권 자동" 표시가 나타나며, 누르면 설정 화면으로 이동해 끌 수 있습니다.
 
 ## 대화 모드
 
@@ -341,6 +346,7 @@ flowchart LR
 | `/mode [이름]` | 대화 모드 보기·변경 |
 | `/turns <N\|inf>` | 이번 요청의 턴 한도 |
 | `/auto on\|off` | off면 위임 전마다 확인 |
+| `/autopilot on\|off` | 전권 자동 수락 켜기·끄기 |
 | `/role list` | 역할 목록 |
 | `/role add <이름> <claude\|codex\|agy> <모델> <설명>` | 역할 추가 |
 | `/role edit <이름> <항목>=<값>` | cli, model, brief, permissions, effort, context_limit, max_sessions 변경 |

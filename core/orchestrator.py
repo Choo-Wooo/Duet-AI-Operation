@@ -149,8 +149,21 @@ class Orchestrator:
 
     @property
     def full_auto(self) -> bool:
-        """전권 자동: 사람이 모든 권한을 위임한 모드 (autonomy: full)."""
-        return self.cfg.mode.autonomy == "full"
+        """전권 자동: 사람이 모든 권한을 위임한 상태 (autonomy: full 모드이거나 설정 full_auto 가 켜짐)."""
+        return self.cfg.mode.autonomy == "full" or bool(self.cfg.settings.get("full_auto"))
+
+    def set_full_auto(self, on: bool) -> str:
+        self.cfg.settings["full_auto"] = bool(on)
+        self.cfg.save_roles()
+        self.emit_status()
+        if on:
+            msg = "전권 자동 수락을 켰습니다: 승인·선택을 묻지 않고 진행합니다 (git push·sudo·시스템 삭제·배포만 막음)."
+        elif self.full_auto:
+            msg = "설정의 자동 수락은 껐지만, 현재 모드가 autopilot 이라 전권 자동이 계속됩니다. 모드를 바꾸세요."
+        else:
+            msg = "전권 자동 수락을 껐습니다. 위험한 요청은 다시 사람에게 묻습니다."
+        self.notice(msg, "warn")
+        return msg
 
     # ================= 상태 =================
     def _on_event(self, ev: Event) -> None:
