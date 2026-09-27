@@ -23,7 +23,7 @@ python3 duet --web    # 브라우저 웹 UI (권장)
 - `.duet/venv` 가상환경 + 의존성(claude-agent-sdk, textual, pyyaml). 파이썬 3.10+ 이 필요하며, 없으면 Homebrew 파이썬이나 `uv` 를 찾아 씁니다.
 - 설치된 CLI 감지 → `.duet/roles.yaml` 생성
   - 설계자 Claude `claude-opus-5-5` · 구현자 Codex `gpt-6-astra`(effort medium, 병렬 최대 3)
-  - 디자이너 Claude `claude-sonnet-5`(병렬 최대 2) · 리서처 Antigravity `gemini-3.8-flash-medium`(병렬 최대 2)
+  - 디자이너 Claude `claude-opus-5-5`(병렬 최대 2, 브라우저 도구 Playwright MCP 자동 연결) · 리서처 Antigravity `gemini-3.8-flash-medium`(병렬 최대 2)
 - `.duet/modes.yaml`, `.duet/policy.yaml`, `DIALOGUE.md`
 - git 저장소가 아니면 `git init` (턴마다 스냅샷 커밋, `/rollback` 용). `.gitignore` 에 duet 폴더·venv·로그 추가
 
@@ -67,6 +67,24 @@ API 를 직접 부르지 않고 설치된 CLI 를 그대로 띄우므로 각 CLI
 - push 는 사람만 합니다. duet 은 원격에 아무것도 올리지 않고, `duet/work/*` push 를 막는 pre-push 훅을 넣습니다
   (기존 pre-push 훅이 있으면 건드리지 않고 알려 줍니다). 모든 작업이 끝나면 기준 브랜치만 push 하면 됩니다.
 - 작업 기록은 `docs/work/<id>.md`, 상태는 `.duet/work.json`. 명령: `/work`, `/work cancel <id>`, `/work resume <id>`, `/work msg <id> <메시지>`
+
+## 전권 자동 모드 (autopilot)
+
+`/mode autopilot` (웹 UI 상단 모드 선택, 또는 `--mode autopilot`) 으로 켭니다. 사람이 모든 권한을 위임한 상태로 끝까지 돕니다.
+
+- 승인: 사람·설계자 확인이 필요하던 요청도 자동 허용합니다. 단 `policy.yaml` 의 `autopilot_deny`
+  (기본: `git push`, `sudo`, `/`·`~` 통째 삭제, `mkfs`/`dd`, 패키지 배포)는 막습니다. push 는 여전히 사람이 합니다.
+- 선택: 턴 한도·합의 라운드·병합 확인 등은 진행 쪽으로 자동 선택합니다. 같은 질문이 5번 넘게 반복되면 멈춥니다. 예산 한도는 지킵니다.
+- 작업자의 질문(ASK_HUMAN, REPORT blocked)은 설계자가 사람 대신 판단해 이어갑니다. 설계자 자신의 ASK_HUMAN 만 사람에게 옵니다.
+- 역할 구조(설계자는 코드 수정 안 함, 합의 전 쓰기 금지)는 그대로입니다.
+
+## 디자이너 역할
+
+- 기본 모델은 웹 UI 디자인 평가(Design Arena)에서 가장 높은 Claude Opus 5.5 입니다.
+- 작업 방법 지침: 기존 스타일 토큰·컴포넌트 확인 → 디자인 시스템 문서 → 방향 2~3개 비교(`/design` 스킬 활용 가능) →
+  구현 → **브라우저로 실제 화면을 열어 데스크톱·모바일 스크린샷을 보며 2번 이상 다듬기** → 접근성 확인.
+- 역할별 `mcp`(그 역할 세션에만 붙는 MCP 서버)와 `auto_tools`(자동 허용할 도구 이름 패턴)를 `roles.yaml` 에서 바꿀 수 있습니다.
+  디자이너 기본값: Playwright MCP(`npx @playwright/mcp --headless`) + `mcp__playwright__*` 자동 허용.
 
 ## Antigravity CLI (agy)
 

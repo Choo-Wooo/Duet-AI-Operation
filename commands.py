@@ -10,7 +10,7 @@ from .core.saves import format_saves
 HELP = """명령어
   (일반 텍스트)              메인 역할(설계자)에게 전달
   /to <역할> <메시지>        특정 역할에게 직접 전달
-  /mode [이름]               대화 모드 보기/변경 (sprint, review, deliberate, …)
+  /mode [이름]               대화 모드 보기/변경 (sprint, review, deliberate, autopilot=전권 자동)
   /turns <N|inf>            이번 요청의 턴 한도 (inf = 무제한)
   /auto on|off              off 면 위임 전마다 확인
   /role list                역할 목록
@@ -45,7 +45,7 @@ def _fmt_roles(orch: Orchestrator) -> str:
 def _fmt_status(orch: Orchestrator) -> str:
     s = orch.status()
     mt = "∞" if s["max_turns"] is None else s["max_turns"]
-    return (f"모드 {s['mode']} · 턴 {s['run_turns']}/{mt} · 자동위임 {'on' if s['auto'] else 'off'} · "
+    return (f"모드 {s['mode']}{' (전권 자동)' if s.get('full_auto') else ''} · 턴 {s['run_turns']}/{mt} · 자동위임 {'on' if s['auto'] else 'off'} · "
             f"{'일시정지 · ' if s['paused'] else ''}실행 중 {s['running'] or '-'} · "
             f"Claude API 환산 ${s['cost_usd']:.2f} (구독이면 실제 청구 아님) · 토큰 {s['tokens']:,}" +
             (f"\n{s['task_summary']}" if s.get("task") else ""))

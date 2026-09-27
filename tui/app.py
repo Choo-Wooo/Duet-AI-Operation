@@ -231,6 +231,8 @@ class DuetApp(App):
         el = int(s.get("elapsed", 0))
         running = s.get("running")
         t = Text()
+        if s.get("full_auto"):
+            t.append("⚡전권 자동  ", style="bold red")
         if s.get("paused"):
             t.append("⏸ 일시정지  ", style="bold yellow")
         if running:

@@ -129,6 +129,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
     <span class="proj" id="proj"></span>
     <span class="chip"><span class="dot" id="rundot"></span><span id="runtxt">대기</span></span>
     <span class="chip" title="대화 모드"><select id="mode" style="border:none;background:none;padding:0"></select></span>
+    <span class="chip" id="autopilot" title="전권 자동: 승인·선택을 묻지 않고 진행 (push·sudo·시스템 삭제·배포만 막음)" hidden style="color:var(--bad);border-color:var(--bad)">전권 자동</span>
     <span class="chip" id="turns" title="이번 요청 턴 / 한도"></span>
     <span class="chip" id="cost" title="Claude API 환산 비용 (구독이면 실제 청구 아님) · 토큰"></span>
     <span class="grow"></span>
@@ -282,7 +283,7 @@ function setState(st) {
   S = st;
   $("#proj").textContent = st.project + (st.fake ? "  (가짜 에이전트)" : "");
   document.title = "duet · " + st.name;
-  const ms = $("#mode"); ms.innerHTML = Object.keys(st.modes).map(m => `<option ${m === st.status.mode ? "selected" : ""}>${m}</option>`).join("");
+  const ms = $("#mode"); ms.innerHTML = Object.entries(st.modes).map(([m, v]) => `<option value="${m}" ${m === st.status.mode ? "selected" : ""}>${m}${v.autonomy === "full" ? " (전권 자동)" : ""}</option>`).join("");
   st.roles.forEach(r => knownRoles.add(r.name));
   renderStatus(st.status);
   renderTargets(); renderRoles(); renderModels(); renderSettings(); renderSaves(); renderAskRoles();
@@ -296,6 +297,7 @@ function renderStatus(s) {
   const working = (s.work || []).filter(w => !["merged", "failed", "cancelled"].includes(w.status) && !w.status.startsWith("waiting") && w.status !== "queued").length;
   $("#runtxt").textContent = s.paused ? "일시정지" : (run ? `${run} 작업 중` : "사람 차례") + (working ? ` · 병렬 ${working}` : "") + (s.pending_approvals ? ` · 승인 대기 ${s.pending_approvals}` : "");
   $("#btnPause").textContent = s.paused ? "재개" : "일시정지";
+  $("#autopilot").hidden = !s.full_auto;
   $("#turns").textContent = `턴 ${s.run_turns}/${s.max_turns == null ? "∞" : s.max_turns}`;
   $("#cost").textContent = `$${(s.cost_usd || 0).toFixed(2)} · ${(s.tokens || 0).toLocaleString()} tok`;
   const ctx = Object.entries(s.contexts || {}).map(([n, [used, lim]]) => {
@@ -527,7 +529,11 @@ $("#askInput").addEventListener("keydown", e => { if (e.key === "Enter" && !e.sh
 $("#askReset").onclick = () => { send({type: "ask_reset", role: $("#askRole").value}); $("#askLog").innerHTML = ""; };
 $("#btnPause").onclick = () => send({type: "control", action: S && S.status.paused ? "resume" : "pause"});
 $("#btnStop").onclick = () => send({type: "control", action: "stop"});
-$("#mode").onchange = e => send({type: "mode", name: e.target.value});
+$("#mode").onchange = e => {
+  const m = S.modes[e.target.value];
+  if (m && m.autonomy === "full" && !confirm("전권 자동 모드로 바꿀까요?\n승인·선택을 묻지 않고 끝까지 진행합니다. git push·sudo·시스템 삭제·배포만 막습니다.")) { e.target.value = S.status.mode; return; }
+  send({type: "mode", name: e.target.value});
+};
 $("#openDialogue").onclick = () => send({type: "read", path: "DIALOGUE.md"});
 $("#modalClose").onclick = () => $("#modal").classList.remove("on");
 $("#modal").onclick = e => { if (e.target.id === "modal") $("#modal").classList.remove("on"); };

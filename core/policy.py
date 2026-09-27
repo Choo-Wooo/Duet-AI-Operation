@@ -16,6 +16,20 @@ SAFE_TOOLS = {"Read", "Grep", "Glob", "LS", "TodoWrite", "Task", "Agent", "Noteb
               "KillShell", "ListMcpResourcesTool", "ReadMcpResourceTool", "Skill", "ToolSearch"}
 NETWORK_TOOLS = {"WebFetch", "WebSearch"}
 PLAN_READ_TOOLS = {"Read", "Grep", "Glob"}
+# 읽기 전용 단계(plan·질문 콘솔)에서도 쓰는 도구: 읽기·검색·도구 불러오기·할 일 목록·보조 에이전트·스킬
+# (보조 에이전트의 도구 호출도 같은 훅을 거치므로 읽기 전용이 그대로 적용된다)
+PLAN_TOOLS = PLAN_READ_TOOLS | {"LS", "ToolSearch", "TodoWrite", "Agent", "Task", "NotebookRead", "Skill",
+                                "BashOutput", "ListMcpResourcesTool", "ReadMcpResourceTool"}
+PLAN_DENY_TEXT = ("읽기 전용 단계: 읽기·검색 도구(Read/Grep/Glob/LS/ToolSearch), 보조 에이전트, 읽기 명령(ls, cat, grep, "
+                  "git log 등)만 쓸 수 있습니다. 파일 쓰기·설치·빌드·실행은 합의 후에 하세요.")
+# 전권 자동(autopilot) 모드에서도 막는 명령: push 는 사람만, 시스템 파괴·관리자 권한 금지
+AUTOPILOT_DENY = [
+    r"\bgit\s+push\b",
+    r"\bsudo\b",
+    r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+(/|~|\$HOME)(\s|$)",
+    r"\bmkfs\b|\bdd\s+if=",
+    r"\b(npm|pnpm|yarn|cargo|twine|poetry)\s+publish\b",
+]
 # 읽기 전용 명령 (모든 역할·모든 단계에서 파일로 리다이렉트하지 않으면 자동 허용)
 READ_COMMAND = re.compile(
     r"^(?:ls|pwd|cat|head|tail|wc|grep|egrep|rg|find|tree|which|diff|stat|file|du|df|sort|uniq|cut|tr|nl|column|"
@@ -32,6 +46,23 @@ PATH_RULE_HINT = "/etc"
 
 def is_read_command(part: str) -> bool:
     return bool(READ_COMMAND.search(part)) and not (part.startswith("find") and _FIND_WRITES.search(part))
+
+
+def read_only_command(cmd: str) -> bool:
+    """파일을 바꾸지 않는 읽기 명령(ls, cat, grep, git log …)만으로 이뤄졌는지."""
+    parts = split_commands(cmd or "")
+    return bool(parts) and not writes_output(cmd) and all(is_read_command(p) or p.startswith("cd ") for p in parts)
+
+
+def read_only_decision(req: "ApprovalRequest", what: str = "이 세션") -> "Decision":
+    """읽기 전용 세션(질문 콘솔·협의 답변)용 승인: 읽기 도구·읽기 명령만 허용."""
+    if (req.kind == "tool" and req.tool in PLAN_TOOLS) or (req.kind == "command" and read_only_command(req.command or "")):
+        return Decision(True, "읽기 전용 허용", by="policy")
+    return Decision(False, f"{what}은 읽기 전용입니다. 파일 수정·실행은 본 작업에서 요청하세요.", by="policy")
+
+
+def tool_matches(tool: str | None, patterns: list[str] | None) -> bool:
+    return bool(tool) and any(fnmatch.fnmatchcase(tool, p) for p in (patterns or []))
 
 
 def writes_output(cmd: str) -> bool:
@@ -171,10 +202,13 @@ class Policy:
         if plan:
             if req.kind in ("file", "permissions"):
                 return DENY, "합의 전 계획/대기 단계에서는 파일 쓰기와 권한 확장을 허용하지 않습니다."
-            if req.kind == "command" and role.cli == "claude":
-                return DENY, "plan 단계: Read/Grep/Glob 만 사용하세요. Bash는 금지됩니다."
-            if req.kind == "tool" and req.tool not in PLAN_READ_TOOLS | NETWORK_TOOLS:
-                return DENY, "plan 단계에서는 읽기 도구 외의 도구를 허용하지 않습니다."
+            if req.kind == "command":
+                if read_only_command(req.command or ""):
+                    return AUTO, "읽기 전용 단계의 읽기 명령"
+                return DENY, PLAN_DENY_TEXT
+            if req.kind == "tool" and not (req.tool in PLAN_TOOLS | NETWORK_TOOLS
+                                           or tool_matches(req.tool, role.auto_tools)):
+                return DENY, PLAN_DENY_TEXT
         if self.task and self.task["phase"] == "verify" and role.name == self.main_role and req.kind == "command":
             if self.verification_command(req):
                 # 실행 파일 절대경로(/usr/bin/python3 등)는 경로 규칙에서 뺀다
@@ -229,6 +263,8 @@ class Policy:
             t = req.tool or ""
             if t in SAFE_TOOLS:
                 return AUTO, "안전한 도구"
+            if tool_matches(t, role.auto_tools):
+                return AUTO, f"'{role.name}' 역할에 자동 허용된 도구"
             if t == "AskUserQuestion":
                 return DENY, "사람에게 물을 때는 턴 끝에 <!-- duet: ASK_HUMAN 질문 --> 지시문을 쓰세요."
             if t in NETWORK_TOOLS:
@@ -238,6 +274,13 @@ class Policy:
         if req.kind == "permissions":
             return HUMAN, "샌드박스 권한 확장 요청"
         return HUMAN, "알 수 없는 요청"
+
+    def autopilot(self, req: ApprovalRequest) -> tuple[str, str]:
+        """전권 자동 모드: 사람·설계자 확인 대상도 자동 허용하되 금지 목록만 막는다."""
+        pats = self.conf.get("autopilot_deny", AUTOPILOT_DENY)
+        if req.kind == "command" and any(re.search(p, req.command or "") for p in pats):
+            return DENY, "전권 자동 모드에서도 막는 명령입니다 (push·sudo·시스템 삭제·배포는 사람이 직접)."
+        return AUTO, "전권 자동 모드 (사람이 모든 권한을 위임)"
 
     def _architect_or_human(self, role: Role, reason: str) -> tuple[str, str]:
         if role.name == self.main_role:

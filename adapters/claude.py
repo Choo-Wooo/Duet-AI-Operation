@@ -21,7 +21,7 @@ from claude_agent_sdk import (
 
 from ..core.clis import which
 from ..core.policy import ApprovalRequest
-from ..core.policy import PLAN_READ_TOOLS, NETWORK_TOOLS
+from ..core.policy import PLAN_DENY_TEXT, PLAN_TOOLS, NETWORK_TOOLS, read_only_command, tool_matches
 from ..core.prompts import REVIEW_SYSTEM
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
 
@@ -95,6 +95,8 @@ class ClaudeAdapter(AgentAdapter):
             kw["effort"] = self.role.effort
         if self.reviewer:
             kw["allowed_tools"] = READONLY_TOOLS
+        elif self.role.mcp:  # 역할 전용 MCP (예: 디자이너의 브라우저 도구). 사용자 MCP 설정에 더해진다
+            kw["mcp_servers"] = dict(self.role.mcp)
         return ClaudeAgentOptions(**kw)
 
     def _on_stderr(self, line: str) -> None:
@@ -134,8 +136,12 @@ class ClaudeAdapter(AgentAdapter):
 
     async def _pre_tool_use(self, data, tool_use_id, context):
         name, inp = data.get("tool_name", ""), data.get("tool_input") or {}
-        if self.plan_read_only and name not in PLAN_READ_TOOLS | NETWORK_TOOLS:
-            allow, reason = False, "plan 단계: Read/Grep/Glob 만 사용하세요. Bash·쓰기·알 수 없는 도구는 금지됩니다."
+        readable = (name in PLAN_TOOLS or tool_matches(name, self.role.auto_tools)
+                    or (name == "Bash" and read_only_command(str(inp.get("command", "")))))
+        if self.plan_read_only and readable:
+            return {}  # 읽기 전용 단계에서도 허용: 기존 권한 규칙/can_use_tool 에 맡긴다
+        if self.plan_read_only and name not in NETWORK_TOOLS:
+            allow, reason = False, PLAN_DENY_TEXT
         elif self.plan_read_only and name in NETWORK_TOOLS:
             decision = await self.approve(ApprovalRequest(self.role.name, "tool", _tool_detail(name, inp),
                                                          tool=name, detail={"input": inp}))

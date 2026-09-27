@@ -31,13 +31,19 @@ def test_T11_claude_pretool_blocks_bash_write_and_unknown_before_allow_settings(
 
     async def scenario():
         ad.plan_read_only = True
-        for name in ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Agent", "Skill", "mcp__write"):
+        for name in ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "mcp__write"):
             result = await hook({"tool_name": name, "tool_input": {"command": "touch x"}}, "tool", None)
             assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-            assert "Read/Grep/Glob" in result["hookSpecificOutput"]["permissionDecisionReason"]
+            assert "읽기 전용 단계" in result["hookSpecificOutput"]["permissionDecisionReason"]
         assert not requests  # 쓰기는 심사자 판단이나 can_use_tool로 넘기지 않는다.
-        for name in ("Read", "Grep", "Glob"):
+        # 읽기·검색·도구 불러오기·보조 에이전트·읽기 명령은 기존 권한 흐름으로 넘긴다
+        for name in ("Read", "Grep", "Glob", "LS", "ToolSearch", "Agent", "Skill", "TodoWrite"):
             assert await hook({"tool_name": name, "tool_input": {}}, "tool", None) == {}
+        for cmd in ("ls -la src", "git log --oneline | head -5", "grep -rn foo src | wc -l"):
+            assert await hook({"tool_name": "Bash", "tool_input": {"command": cmd}}, "tool", None) == {}
+        for cmd in ("ls > out.txt", "npm install", "sed -i s/a/b/ x"):
+            r = await hook({"tool_name": "Bash", "tool_input": {"command": cmd}}, "tool", None)
+            assert r["hookSpecificOutput"]["permissionDecision"] == "deny"
         network = await hook({"tool_name": "WebSearch", "tool_input": {"query": "example"}}, "tool", None)
         assert requests[-1].tool == "WebSearch"
         assert network["hookSpecificOutput"]["permissionDecision"] == "deny"  # 기존 네트워크 심사 결과

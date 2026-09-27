@@ -24,7 +24,7 @@ from ..core.config import PERMISSION_PROFILES, SUPPORTED_CLIS, Config, Role
 from ..core.events import Event, EventBus
 from ..core.models import read_cache, refresh
 from ..core.orchestrator import Orchestrator
-from ..core.policy import ApprovalRequest, Decision
+from ..core.policy import ApprovalRequest, Decision, read_only_decision
 
 STATIC = Path(__file__).parent / "static"
 REPLAY = 3000
@@ -146,7 +146,8 @@ class WebUI:
             "main": self.cfg.main,
             "clis": list(SUPPORTED_CLIS),
             "permissions": list(PERMISSION_PROFILES),
-            "modes": {n: {"max_turns": m.max_turns, "style": m.style} for n, m in self.cfg.modes.items()},
+            "modes": {n: {"max_turns": m.max_turns, "style": m.style, "autonomy": m.autonomy}
+                      for n, m in self.cfg.modes.items()},
             "settings": {k: self.cfg.settings.get(k) for k in SETTINGS},
             "settings_help": {k: v[2] for k, v in SETTINGS.items()},
             "saves": self._saves(),
@@ -344,7 +345,7 @@ class WebUI:
                 base = self.cfg.state.sessions.get(role_name)
 
                 async def deny(req: ApprovalRequest) -> Decision:
-                    return Decision(False, "질문 패널은 읽기 전용입니다.", by="policy")
+                    return read_only_decision(req, "질문 패널")
                 ad = make_adapter(role, self.cfg.project, bus, deny, base, ASK_SYSTEM.replace("{role}", role_name),
                                   fake=self.fake, fork_session=bool(base))
                 ad.plan_read_only = True

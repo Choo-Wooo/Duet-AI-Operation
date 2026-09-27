@@ -25,7 +25,7 @@ import yaml
 
 from .agreement import parse_plan
 from .dialogue import extract_directives
-from .policy import ApprovalRequest, Decision, Policy, AUTO
+from .policy import ApprovalRequest, Decision, Policy, AUTO, read_only_decision
 from .worktrees import GitError, Worktrees, valid_id
 
 if TYPE_CHECKING:
@@ -88,7 +88,7 @@ PARALLEL_SYSTEM = """
 ```
 - 작업 사이 인터페이스(함수 이름·API 형태·파일 경계)는 블록을 내기 전에 docs/ 설계 문서로 고정하세요.
 - 같은 파일을 두 작업이 동시에 고치지 않게 나누세요. 겹치면 depends_on 으로 순서를 주세요.
-- 진행 중 작업 취소: `<!-- duet: CANCEL_WORK <id> <사유> -->`, 대기 작업 재개: `<!-- duet: RESUME_WORK <id> -->`
+- 진행 중 작업 취소: `<!-- duet: CANCEL_WORK <id> <사유> -->`, 대기 작업 재개: `<!-- duet: RESUME_WORK <id> [작업자에게 줄 답·지시] -->`
 - 병렬 작업이 도는 동안 DELEGATE 는 쓰지 마세요 (메인 작업 트리 충돌 방지).
 """
 
@@ -315,7 +315,11 @@ class WorkBoard:
                 wid, _, why = v.partition(" ")
                 out.append(self.cancel(wid, why or "설계자 취소"))
             elif k == "RESUME_WORK":
-                out.append(self.resume(v.split()[0] if v.split() else ""))
+                wid, _, text = v.partition(" ")
+                if text.strip() and wid in self.items:  # 대기 사유(질문)에 대한 답을 함께 전달
+                    self.items[wid].inbox.append(f"설계자: {text.strip()}")
+                    self._thread(self.items[wid], "설계자", text.strip())
+                out.append(self.resume(wid))
         return out
 
     def cancel(self, wid: str, reason: str) -> str:
@@ -420,8 +424,9 @@ class WorkBoard:
             return ad
         from ..adapters import make_adapter
         role = self._worker_role(it)
+        from .prompts import role_guide
         system = WORK_SYSTEM.format(role=it.role, id=it.id, brief=role.brief, branch=f"duet/work/{it.id}",
-                                    base=self.base)
+                                    base=self.base) + role_guide(it.role)
         pol = Policy(path, self.cfg.policy, self.cfg.main)
         ad = make_adapter(role, path, self.orch.bus, lambda req: self._approve(it, pol, req), it.session_id,
                           system, fake=self.orch.fake)
@@ -463,8 +468,8 @@ class WorkBoard:
     async def _turn(self, ad, it: WorkItem, kind: str, prompt: str, who: str):
         await self.orch.not_paused.wait()
         ad.turn_kind = kind
-        if it.inbox and not who.endswith("(설계자)"):
-            prompt += "\n\n사람이 이 작업에 보낸 메시지:\n" + "\n".join(f"- {m}" for m in it.inbox)
+        if it.inbox and who != "설계자":
+            prompt += "\n\n이 작업에 온 메시지 (사람·설계자):\n" + "\n".join(f"- {m}" for m in it.inbox)
             it.inbox.clear()
         self.orch.bus.emit("turn_start", ad.label, n=0, kind=kind, info=it.id)
         tr = await ad.run_turn(prompt)
@@ -767,9 +772,7 @@ class WorkBoard:
         return f"{other.id} ({other.role}) 답변:\n{text}"
 
     async def _read_only_answer(self, req: ApprovalRequest) -> Decision:
-        if req.kind == "tool" and req.tool in ("Read", "Grep", "Glob", "LS"):
-            return Decision(True, "읽기", by="policy")
-        return Decision(False, "협의 답변 세션은 읽기 전용입니다.", by="policy")
+        return read_only_decision(req, "협의 답변 세션")
 
     @staticmethod
     def _check_ask(dirs: list[tuple[str, str]], phase: str) -> None:

@@ -15,8 +15,11 @@ SUPPORTED_CLIS = ("claude", "codex", "agy")
 PERMISSION_PROFILES = ("read_only", "workspace_write")
 
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra", "agy": "gemini-3.8-flash-medium"}
+# 디자이너가 만든 화면을 직접 열어 보고 스크린샷으로 확인하는 브라우저 도구 (Claude Code 가 npx 로 실행)
+PLAYWRIGHT_MCP = {"playwright": {"type": "stdio", "command": "npx",
+                                 "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated"]}}
 # 역할별 기본 모델 (CLI 가 있을 때)
-DESIGNER_MODEL = "claude-sonnet-5"
+DESIGNER_MODEL = "claude-opus-5-5"  # Design Arena(2026-09) 웹 UI 1위
 RESEARCHER_MODEL = "gemini-3.8-flash-medium"
 
 
@@ -30,6 +33,8 @@ class Role:
     effort: str | None = None  # codex: reasoning effort, claude: effort
     context_limit: int | None = None  # 이 역할 세션의 컨텍스트 한도(토큰). 없으면 settings.context_limit_tokens
     max_sessions: int = 1  # 병렬 작업 때 이 역할로 동시에 띄울 수 있는 세션 수 (설계자가 이 안에서 결정)
+    auto_tools: list[str] = field(default_factory=list)  # 이 역할에 자동 허용할 도구 이름 패턴 (예: mcp__playwright__*)
+    mcp: dict = field(default_factory=dict)  # 이 역할 세션에만 추가로 붙일 MCP 서버 (Claude Code)
 
     def to_yaml(self) -> dict:
         d = {"cli": self.cli, "model": self.model, "brief": self.brief, "permissions": self.permissions}
@@ -39,6 +44,10 @@ class Role:
             d["context_limit"] = self.context_limit
         if self.max_sessions != 1:
             d["max_sessions"] = self.max_sessions
+        if self.auto_tools:
+            d["auto_tools"] = list(self.auto_tools)
+        if self.mcp:
+            d["mcp"] = dict(self.mcp)
         return d
 
 
@@ -49,6 +58,7 @@ class Mode:
     style: str
     stall_turns: int = 6
     agreement: bool = True
+    autonomy: str = "normal"  # normal | full (전권 자동: 승인·선택을 사람에게 묻지 않음)
 
 
 DEFAULT_MODES = {
@@ -58,6 +68,11 @@ DEFAULT_MODES = {
         "deliberate", None,
         "구현 전에 구현자와 대안·반론·위험을 충분히 주고받는다. 구현자에게 설계 검토를 먼저 요청해도 좋다. "
         "대화량보다 매 턴 새 정보(결정·근거·질문·발견)가 오가는 것이 중요하다.", 12),
+    "autopilot": Mode(
+        "autopilot", None,
+        "사람이 모든 권한을 위임했다. 승인·선택을 기다리지 말고 끝까지 진행한다. 판단이 필요한 것은 스스로 정하고 근거를 "
+        "docs/ 에 남긴다. 작업자의 질문에는 사람 대신 답한다. ASK_HUMAN 은 요구 자체가 모호해 더 진행할 수 없을 때만 쓴다. "
+        "검증은 평소보다 엄격하게 하고, 막히면 방법을 바꿔 다시 시도한다.", 10, True, "full"),
 }
 
 DEFAULT_POLICY = {
@@ -179,6 +194,7 @@ class Config:
                 name=name, cli=r.get("cli", "claude"), model=r.get("model"), brief=r.get("brief", ""),
                 permissions=r.get("permissions", "workspace_write"), effort=r.get("effort"),
                 context_limit=r.get("context_limit"), max_sessions=r.get("max_sessions", 1),
+                auto_tools=list(r.get("auto_tools") or []), mcp=dict(r.get("mcp") or {}),
             )
             ms = self.roles[name].max_sessions
             if type(ms) is not int or ms < 1:
@@ -203,6 +219,7 @@ class Config:
                     style=m.get("style", ""),
                     stall_turns=int(m.get("stall_turns", 6)),
                     agreement=agreement,
+                    autonomy="full" if str(m.get("autonomy", "normal")) == "full" else "normal",
                 )
         if self.policy_file.exists():
             self.policy.update(yaml.safe_load(self.policy_file.read_text(encoding="utf-8")) or {})
@@ -231,9 +248,11 @@ class Config:
         _dump_yaml(
             self.modes_file,
             {"modes": {n: {"max_turns": m.max_turns if m.max_turns is not None else "inf",
-                           "stall_turns": m.stall_turns, "style": m.style, "agreement": m.agreement}
+                           "stall_turns": m.stall_turns, "style": m.style, "agreement": m.agreement,
+                           **({"autonomy": m.autonomy} if m.autonomy != "normal" else {})}
                        for n, m in self.modes.items()}},
-            "# 대화 모드 프리셋. max_turns: 숫자 또는 inf(무제한). stall_turns: 코드 변경 없이 이 턴 수가 지나면 정체로 판단(0=끔).",
+            "# 대화 모드 프리셋. max_turns: 숫자 또는 inf(무제한). stall_turns: 코드 변경 없이 이 턴 수가 지나면 정체로 판단(0=끔).\n"
+            "# autonomy: full 이면 전권 자동 (승인·선택을 사람에게 묻지 않고 진행, policy.yaml 의 autopilot_deny 만 막음)",
         )
 
     def save_policy(self) -> None:
@@ -291,6 +310,7 @@ def default_roles(clis: dict[str, str]) -> tuple[str, dict[str, Role]]:
             "화면·UX·API 형태·데이터 모델을 설계하고 시안(docs/design/, 목업 코드, 스타일)을 만든다. "
             "구현자와 인터페이스를 맞추고, 결정 근거를 문서로 남긴다.",
             "workspace_write", context_limit=300000, max_sessions=2,
+            auto_tools=["mcp__playwright__*"], mcp=dict(PLAYWRIGHT_MCP),
         )
     researcher_cli = "agy" if "agy" in clis else ("claude" if "claude" in clis else None)
     if researcher_cli:

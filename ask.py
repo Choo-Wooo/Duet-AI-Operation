@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .core.config import Config
 from .core.events import Event, EventBus
-from .core.policy import ApprovalRequest, Decision
+from .core.policy import ApprovalRequest, Decision, read_only_decision
 from .core.prompts import ASK_SYSTEM, COMPACT_ASK
 
 DIM, BOLD, CYAN, RED, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[31m", "\033[0m"
@@ -139,7 +139,7 @@ def _ainput(loop: asyncio.AbstractEventLoop, prompt: str) -> asyncio.Future:
 
 
 async def _read_only_approver(req: ApprovalRequest) -> Decision:
-    return Decision(False, "질문 콘솔은 읽기 전용입니다. 파일 수정·명령 실행은 본 작업에서 요청하세요.", by="policy")
+    return read_only_decision(req, "질문 콘솔")
 
 
 async def run_ask(cfg: Config, role_name: str | None = None, fake: bool = False) -> int:
@@ -167,7 +167,7 @@ async def run_ask(cfg: Config, role_name: str | None = None, fake: bool = False)
     bus.subscribe(_print_event)
     ad = make_adapter(role, project, bus, _read_only_approver, base_session,
                       ASK_SYSTEM.replace("{role}", role_name), fake=fake, fork_session=bool(base_session))
-    ad.plan_read_only = True  # Claude: Read/Grep/Glob 만, Codex: 읽기 전용 샌드박스
+    ad.plan_read_only = True  # Claude: 읽기·검색 도구와 읽기 명령만, Codex: 읽기 전용 샌드박스
     print(f"{BOLD}duet 질문 콘솔 — {role_name}{RESET}  ({role.cli}/{role.model or '기본'})")
     print(f"{DIM}{'현재 ' + role_name + ' 세션을 복제해 지금까지의 맥락을 이어받습니다.' if base_session else '아직 본 세션이 없어 작업 기억과 DIALOGUE.md 로 맥락을 잡습니다.'}"
           f" 본 작업에는 영향이 없습니다. 끝내려면 /quit{RESET}")

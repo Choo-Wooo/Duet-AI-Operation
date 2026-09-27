@@ -45,11 +45,47 @@ def handoff_note(role: str) -> str:
             "큰 파일은 통째로 읽지 말고 grep·부분 읽기로 필요한 곳만 보세요.")
 
 
+class AutopilotUI:
+    """전권 자동 모드면 사람에게 묻지 않고 선택지를 스스로 고른다. 아니면 실제 UI 로 넘긴다."""
+    # 앞에 있을수록 먼저 고른다 (진행 쪽으로)
+    PREFER = ("summarize", "agree", "merge", "more", "+30", "+10", "yes", "add", "continue")
+    STOP = ("wait", "hold", "stop", "wrap", "no", "skip", "cancel")
+
+    def __init__(self, ui: HumanUI, orch: "Orchestrator"):
+        self.real, self.orch = ui, orch
+        self.counts: dict[str, int] = {}
+
+    async def ask_approval(self, req: ApprovalRequest, reason: str, opinion: str | None) -> Decision:
+        return await self.real.ask_approval(req, reason, opinion)
+
+    async def ask_choice(self, title: str, body: str, options: list[tuple[str, str]]) -> str:
+        if not self.orch.full_auto:
+            return await self.real.ask_choice(title, body, options)
+        keys = [k for k, _ in options]
+        key = re.sub(r"\[[^\]]*\]\s*", "", title)  # 작업 id 를 빼고 같은 종류의 질문끼리 센다
+        self.counts[key] = self.counts.get(key, 0) + 1
+        if "예산" in title:
+            pick = next((k for k in keys if k == "stop"), keys[-1])  # 사람이 정한 예산은 지킨다
+        elif self.counts[key] > 5:  # 같은 질문이 반복되면 무한 진행을 막고 멈춘다
+            pick = next((k for k in keys if k in self.STOP), keys[-1])
+        else:
+            pick = next((k for p in self.PREFER for k in keys if k == p), keys[0])
+        label = dict(options).get(pick, pick)
+        self.orch.notice(f"[전권 자동] {title} → {label}", "warn")
+        return pick
+
+    def reset(self) -> None:
+        self.counts.clear()
+
+    def __getattr__(self, name: str):  # 실제 UI 의 다른 속성은 그대로 노출
+        return getattr(self.real, name)
+
+
 class Orchestrator:
     def __init__(self, cfg: Config, bus: EventBus, ui: HumanUI, fake: bool = False):
         self.cfg = cfg
         self.bus = bus
-        self.ui = ui
+        self.ui = AutopilotUI(ui, self)
         self.fake = fake
         self.project = cfg.project
         self.dialogue = Dialogue(cfg.project)
@@ -95,6 +131,11 @@ class Orchestrator:
         self.work = WorkBoard(self)
         bus.subscribe(self._on_event)
 
+    @property
+    def full_auto(self) -> bool:
+        """전권 자동: 사람이 모든 권한을 위임한 모드 (autonomy: full)."""
+        return self.cfg.mode.autonomy == "full"
+
     # ================= 상태 =================
     def _on_event(self, ev: Event) -> None:
         if ev.kind == "usage":
@@ -111,6 +152,7 @@ class Orchestrator:
             "run_turns": self.run_turns,
             "max_turns": None if mt is None else mt + self.extra_turns,
             "mode": self.cfg.state.mode,
+            "full_auto": self.full_auto,
             "auto": self.cfg.state.auto,
             "paused": not self.not_paused.is_set(),
             "pending_approvals": self.pending_approvals,
@@ -223,6 +265,8 @@ class Orchestrator:
             policy = self.policy
             self.policy.task = self.cfg.state.task
         tier, reason = policy.classify(req, role)
+        if self.full_auto and tier in (ARCHITECT, HUMAN):
+            tier, reason = policy.autopilot(req)
         opinion = None
         if tier == AUTO:
             d = Decision(True, reason, by="auto")
@@ -291,6 +335,9 @@ class Orchestrator:
         return None, opinion
 
     async def _ask_human(self, req: ApprovalRequest, reason: str, opinion: str | None) -> Decision:
+        if self.full_auto:
+            tier, why = self.policy.autopilot(req)
+            return Decision(tier == AUTO, why, by="autopilot")
         self.pending_approvals += 1
         self.emit_status()
         try:
@@ -303,6 +350,7 @@ class Orchestrator:
 
     # ================= 사람 입력 =================
     def submit(self, text: str, to: str | None = None) -> None:
+        self.ui.reset()
         self.inbox.put_nowait((to, text))
         if self.running:
             self.notice("메시지를 받았습니다. 현재 턴이 끝나면 전달합니다.")
@@ -454,7 +502,9 @@ class Orchestrator:
                     break
                 if c == "summarize":
                     nxt = (self.cfg.main, "system",
-                           f"오케스트레이터가 정체를 감지했습니다: {problem}\n막힌 지점과 원인, 다음에 시도할 방법을 정리하고 사람에게 선택지를 제시하세요 (ASK_HUMAN).")
+                           f"오케스트레이터가 정체를 감지했습니다: {problem}\n막힌 지점과 원인, 다음에 시도할 방법을 정리하고 "
+                           + ("다른 방법으로 다시 위임하거나, 더 진행할 수 없으면 정리하고 STATUS done 으로 마치세요."
+                              if self.full_auto else "사람에게 선택지를 제시하세요 (ASK_HUMAN)."))
                     continue
             nxt = await self._decide(role, kind, tr, turn)
 
@@ -728,6 +778,8 @@ class Orchestrator:
                 await self._propose_role(arg)
         q = turn.directive("ASK_HUMAN")
         if q is not None:
+            if self.full_auto and role != self.cfg.main:
+                return self._autopilot_question(role, q)
             self.bus.emit("ask", role, text=q or "(질문 내용 없음)")
             return None
         main = self.cfg.main
@@ -863,6 +915,8 @@ class Orchestrator:
         action, arg = actions[0]
         if action == "ASK_HUMAN":
             self._wait_task(arg or "사람 응답 대기")
+            if self.full_auto and role != main:
+                return self._autopilot_question(role, arg, resume=True)
             self.bus.emit("ask", role, text=arg or "사람 응답 대기")
             return None
         if action == "CANCEL" and role == main and arg:
@@ -879,6 +933,8 @@ class Orchestrator:
             return (worker, phase, f"메인 #{turn.n} RESUME. 대기 사유: {reason}")
         if role == worker and action == "REPORT" and arg.split(maxsplit=1)[0:1] == ["blocked"]:
             self._wait_task(f"작업자 #{turn.n}: {arg}")
+            if self.full_auto:
+                return self._autopilot_question(role, arg, resume=True)
             self.bus.emit("ask", worker, text=arg)
             return None
         if phase == "plan" and role == worker and action == "PLAN" and arg == "ready":
@@ -935,6 +991,15 @@ class Orchestrator:
                                               Turn(role, turn.n, turn.rest, turn.start, turn.end, body))
                 return None
         return invalid()
+
+    def _autopilot_question(self, role: str, question: str, resume: bool = False) -> Next:
+        """전권 자동: 작업자가 사람에게 묻는 질문을 메인이 사람 대신 판단하게 한다."""
+        self.notice(f"[전권 자동] {role} 의 질문을 {self.cfg.main} 가 대신 판단합니다: {question[:120]}", "warn")
+        how = ("판단을 DIALOGUE.md 에 적고 RESUME 로 작업을 재개시키거나, 진행할 수 없으면 CANCEL 사유로 취소하세요."
+               if resume else "판단을 DIALOGUE.md 에 적고 필요하면 다시 위임하세요.")
+        return (self.cfg.main, "system",
+                f"[전권 자동 모드] {role} 가 사람에게 묻습니다: {question or '(내용 없음)'}\n"
+                f"사람이 모든 권한을 위임했으니 설계와 요구에 근거해 당신이 대신 결정하세요. {how}")
 
     async def _propose_role(self, arg: str) -> None:
         parts = arg.split(None, 3)
@@ -1131,7 +1196,9 @@ class Orchestrator:
         self.cfg.save_state()
         self.emit_status()
         mt = self.cfg.max_turns
-        return f"모드 {name} (턴 한도 {'∞' if mt is None else mt})"
+        extra = (" — 전권 자동: 승인·선택을 묻지 않고 진행합니다 (git push·sudo·시스템 삭제·배포만 막음)"
+                 if self.full_auto else "")
+        return f"모드 {name} (턴 한도 {'∞' if mt is None else mt}){extra}"
 
     def set_max_turns(self, value: int | None) -> str:
         self.cfg.state.max_turns = value

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.clis import which
-from ..core.policy import ApprovalRequest
+from ..core.policy import PLAN_DENY_TEXT, ApprovalRequest, read_only_command
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
 
 HOOK_NAME = "duet-policy"
@@ -167,9 +167,9 @@ class AgyAdapter(AgentAdapter):
             pass
 
     async def _decide(self, name: str, args: dict) -> dict:
-        if self.plan_read_only and name not in PLAN_OK:
-            return {"decision": "deny",
-                    "reason": "plan 단계: 파일 읽기·검색만 사용하세요. 명령 실행·쓰기·그 밖의 도구는 금지됩니다."}
+        cmd = str((args or {}).get("CommandLine") or "") if name == "run_command" else ""
+        if self.plan_read_only and name not in PLAN_OK and not (cmd and read_only_command(cmd)):
+            return {"decision": "deny", "reason": PLAN_DENY_TEXT}
         req = to_request(self.role.name, name, args)
         d = await self.approve(req)
         if d.allow:
