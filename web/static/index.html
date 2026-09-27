@@ -188,7 +188,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
       </section>
 
       <section class="view" id="v-docs">
-        <div class="doctoolbar" id="docToolbar"><input id="docFilter" placeholder="문서 경로 필터"><button id="docRefresh">새로고침</button><span id="docPath"></span></div>
+        <div class="doctoolbar" id="docToolbar"><input id="docFilter" placeholder="문서 경로 필터"><button id="docRefresh">새로고침</button><button id="docExpand" title="모든 폴더 펼치기">모두 펼치기</button><button id="docCollapse" title="모든 폴더 접기">모두 접기</button><span id="docPath"></span></div>
         <div class="docs-layout"><aside id="docList"></aside><article id="docBody">문서를 선택하세요.</article></div>
       </section>
       <section class="view" id="v-work">
@@ -273,7 +273,18 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 #docList,#docBody { min-height:0;overflow:auto; }
 #docList { padding:10px;border-right:1px solid var(--line); }
 #docList h4 { margin:10px 0 4px;font-size:12px;color:var(--dim); }
-#docList button { display:block;text-align:left;width:100%;margin:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+#docList { padding:6px 4px; }
+#docList .trow { display:flex;align-items:center;gap:6px;width:100%;margin:1px 0;padding:4px 8px;border:1px solid transparent;border-radius:6px;background:none;text-align:left;white-space:nowrap;overflow:hidden;cursor:pointer;font-size:13px;line-height:18px; }
+#docList .trow:hover { background:var(--panel2); }
+#docList .trow.sel { background:var(--panel2);border-color:var(--accent);color:var(--accent); }
+#docList .trow .tw { flex:none;width:12px;height:12px;display:inline-flex;align-items:center;justify-content:center;color:var(--dim);transition:transform .12s; }
+#docList .trow .tw::before { content:"";border-style:solid;border-width:4px 0 4px 6px;border-color:transparent transparent transparent currentColor; }
+#docList .trow.open .tw { transform:rotate(90deg); }
+#docList .trow.file .tw::before { border:none;width:6px;height:6px;border-radius:1px;background:var(--line); }
+#docList .trow .tn { flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis; }
+#docList .trow.folder .tn { font-weight:600; }
+#docList .trow .tc { flex:none;font-size:11px;color:var(--dim);background:var(--chip);border-radius:999px;padding:0 7px; }
+#docList .trow .td { flex:none;font-size:11px;color:var(--dim);font-family:var(--mono); }
 #docBody { padding:16px 24px; }
 .md { max-width:860px;margin:0 auto;min-width:0;overflow-wrap:anywhere;line-height:1.65; }
 .md h1,.md h2,.md h3,.md h4,.md h5,.md h6 { margin:1.2em 0 .5em;line-height:1.3; }
@@ -295,6 +306,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 </style>
 <script src="/static/md.js"></script>
 <script src="/static/activity.js"></script>
+<script src="/static/doctree.js"></script>
 <script>
 (() => {
 const $ = s => document.querySelector(s);
@@ -303,35 +315,53 @@ if (token) history.replaceState(null, "", "/");
 let ws, S = null, rid = 0;
 let activityNow = DuetActivity.clock(Date.now()/1000, performance.now()/1000);
 const activityRoles=document.createElement('div');activityRoles.id='activityRoles';$('#v-live').prepend(activityRoles);
-const docButtons=new Map();let docShown=null;
+const docButtons=new Map();let docShown=null;let docRows=[];
+const DOC_TREE_KEY='duet.docs.tree.'+location.host;
+let docTreeState={};try{docTreeState=JSON.parse(localStorage.getItem(DOC_TREE_KEY)||'{}')||{};}catch(e){docTreeState={};}
+const saveDocTree=()=>{try{localStorage.setItem(DOC_TREE_KEY,JSON.stringify(docTreeState));}catch(e){}};
+// 폴더 트리: 줄마다 DOM 노드를 재사용하고 순서만 맞춘다 (전체 다시 그리기 없음)
+function drawDocTree(){
+  const box=$('#docList'),entries=DocTree.build(docRows,{state:docTreeState,query:$('#docFilter').value,selected:docShown});
+  const seen=new Set(entries.map(e=>e.key));
+  for(const [key,b] of docButtons)if(!seen.has(key)){b.remove();docButtons.delete(key);}
+  let anchor=null;
+  const place=node=>{const want=anchor?anchor.nextSibling:box.firstChild;if(want!==node)box.insertBefore(node,want);anchor=node;};
+  for(const e of entries){
+    let b=docButtons.get(e.key);
+    if(!b){
+      b=document.createElement('button');b.type='button';b.className='trow '+e.kind;
+      b.innerHTML='<span class="tw"></span><span class="tn"></span><span class="'+(e.kind==='folder'?'tc':'td')+'"></span>';
+      if(e.kind==='folder')b.onclick=()=>{const cur=b.classList.contains('open');docTreeState[b.dataset.path]=!cur;saveDocTree();drawDocTree();};
+      else b.onclick=()=>{docViewer.select(b.dataset.path);docShown=b.dataset.path;drawDocTree();};
+      docButtons.set(e.key,b);
+    }
+    b.dataset.path=e.path;b.style.paddingLeft=(8+e.depth*14)+'px';
+    b.querySelector('.tn').textContent=e.name;
+    b.title=e.kind==='folder'?e.path+' ('+e.count+'개 문서)':e.path+(e.mtime?' · 수정 '+DocTree.shortDate(e.mtime):'');
+    b.querySelector(e.kind==='folder'?'.tc':'.td').textContent=e.kind==='folder'?e.count:(e.recent?(e.dir||'/'):DocTree.shortDate(e.mtime).slice(0,5));
+    if(e.kind==='folder'){b.classList.toggle('open',e.open);b.setAttribute('aria-expanded',e.open?'true':'false');}
+    else b.classList.toggle('sel',e.path===docShown);
+    place(b);
+  }
+  while(anchor?anchor.nextSibling:box.firstChild)(anchor?anchor.nextSibling:box.firstChild).remove();
+}
 const docViewer=renderMarkdown.createViewer({
   fetch:async url=>{const res=await fetch(url+(url.includes('?')?'&':'?')+'t='+encodeURIComponent(token));if(!res.ok)throw new Error('문서를 열 수 없습니다 ('+res.status+')');return res.json();},
   setInterval:(f,ms)=>setInterval(f,ms),clearInterval:id=>clearInterval(id),
-  onList:rows=>{
-    const box=$('#docList'),seen=new Set(rows.map(r=>r.path)),groups=new Set();
-    for(const [path,b] of docButtons)if(!seen.has(path)){b.remove();docButtons.delete(path);}
-    let anchor=null;
-    const place=node=>{const want=anchor?anchor.nextSibling:box.firstChild;if(want!==node)box.insertBefore(node,want);anchor=node;};
-    for(const row of rows){
-      const group=row.path==='DIALOGUE.md'?'대화':row.path.startsWith('docs/')?'docs':row.path.startsWith('.duet/memory/')?'작업 기억':'기타';
-      if(!groups.has(group)){groups.add(group);let h=[...box.children].find(x=>x.tagName==='H4'&&x.dataset.g===group);
-        if(!h){h=document.createElement('h4');h.dataset.g=group;h.textContent=group;}place(h);}
-      let b=docButtons.get(row.path);
-      if(!b){b=document.createElement('button');b.textContent=b.title=row.path;b.onclick=()=>docViewer.select(row.path);docButtons.set(row.path,b);}
-      place(b);
-    }
-    while(anchor?anchor.nextSibling:box.firstChild)(anchor?anchor.nextSibling:box.firstChild).remove();
-  },
+  onList:rows=>{docRows=rows;drawDocTree();},
   onDocument:doc=>{
     const body=$('#docBody'),same=doc.path===docShown,range=body.scrollHeight-body.clientHeight,ratio=same&&range>0?body.scrollTop/range:0;
     $('#docPath').textContent=$('#docPath').title=doc.path;
     const md=document.createElement('div');md.className='md';md.innerHTML=renderMarkdown(doc.content);body.replaceChildren(md);
     docShown=doc.path;body.scrollTop=same?ratio*(body.scrollHeight-body.clientHeight):0;
+    if(!same)drawDocTree();
   },
   onError:e=>{docShown=null;$('#docBody').textContent=e.message;}
 });
 $('#docFilter').oninput=e=>docViewer.filter(e.target.value);
 $('#docRefresh').onclick=()=>docViewer.refresh(true);
+$('#docExpand').onclick=()=>{for(const f of DocTree.folders(docRows))docTreeState[f]=true;docTreeState[DocTree.RECENT]=true;saveDocTree();drawDocTree();};
+$('#docCollapse').onclick=()=>{for(const f of DocTree.folders(docRows))docTreeState[f]=false;saveDocTree();drawDocTree();};
 $('#docBody').onclick=e=>{const a=e.target.closest('a');if(!a)return;const href=a.getAttribute('href');const path=docViewer.relative(href);if(path){e.preventDefault();docViewer.select(path);}else if(!/^https?:\/\//i.test(href)){e.preventDefault();}};
 
 const activityChips=new Map();
