@@ -8,6 +8,7 @@
 :root {
   --bg: #0f1115; --panel: #161a21; --panel2: #1c212a; --line: #262c37; --text: #dde3ec; --dim: #8b95a5;
   --accent: #7aa2f7; --ok: #7ec27e; --warn: #e0af68; --bad: #f7768e; --chip: #232936;
+  --composer-h: 72px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Segoe UI", sans-serif;
 }
@@ -25,10 +26,13 @@ button.danger { color: var(--bad); }
 input, select, textarea { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
 textarea { resize: vertical; }
 .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
-header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header { display: flex; align-items: center; gap: 12px; height: 44px; flex: none; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: nowrap; white-space: nowrap; overflow: hidden; }
 header .brand { font-weight: 700; letter-spacing: .3px; }
-header .proj { color: var(--dim); font-family: var(--mono); font-size: 12px; }
-header .grow { flex: 1; }
+header > * { flex: none; }
+header .proj { color: var(--dim); font-family: var(--mono); font-size: 12px; max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#proj, #runchip { flex: 0 1 auto; min-width: 0; }
+#runchip { overflow: hidden; }
+header .grow { flex: 1 1 0; min-width: 0; }
 .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--chip); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 12px; white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .dot.run { background: var(--ok); animation: pulse 1.2s infinite; }
@@ -47,9 +51,14 @@ nav .ctx { font-size: 11px; color: var(--dim); padding: 6px 10px; }
 .bar > i.hot { background: var(--warn); }
 main { min-height: 0; display: flex; flex-direction: column; }
 .view { display: none; flex: 1; min-height: 0; }
-.view.on { display: flex; }
-#pending { display: flex; flex-direction: column; gap: 8px; padding: 0 14px; }
-#pending:not(:empty) { padding-top: 10px; }
+.view.on { display: flex; flex-direction: column; }
+#pendingTray { position: fixed; right: 16px; bottom: calc(var(--composer-h) + 12px); width: 420px; max-width: calc(100vw - 32px); z-index: 15; background: var(--panel); border: 1px solid var(--warn); border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+#pendingTray.zero { display: none; }
+.trayhead .grow { flex: 1; }
+.trayhead { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; font-size: 12px; white-space: nowrap; }
+#pending { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; padding: 0 10px 10px; }
+#pending:empty, #pendingTray.collapsed #pending { display: none; }
+#pending .mono { white-space: pre-wrap; overflow-wrap: anywhere; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .card.alert { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; }
 .card h4 { margin: 0 0 6px; font-size: 14px; }
@@ -106,12 +115,23 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 .modal .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; width: min(1000px, 100%); max-height: 90vh; display: flex; flex-direction: column; }
 .modal .box header { border-radius: 12px 12px 0 0; }
 .modal .box .content { overflow: auto; padding: 14px; }
-.toast { position: fixed; right: 16px; bottom: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; max-width: 520px; white-space: pre-wrap; box-shadow: 0 6px 20px rgba(0,0,0,.25); display: none; z-index: 20; }
+.toast { position: fixed; right: 16px; top: 56px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; max-width: 520px; white-space: pre-wrap; box-shadow: 0 6px 20px rgba(0,0,0,.25); display: none; z-index: 20; }
 .toast.on { display: block; }
 .askpane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .qa { border-bottom: 1px dashed var(--line); padding: 10px 0; }
 .qa .q { font-weight: 600; }
-.conn { font-size: 12px; }
+.conn { font-size: 12px; min-width: 48px; text-align: center; flex: none; }
+#runtxt { display: block; flex: 0 1 auto; min-width: 0; white-space: nowrap; max-width: 280px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+#btnPause { min-width: 84px; flex: none; }
+#btnStop { flex: none; }
+.pbadge { flex: none; }
+.pbadge.zero { opacity: .45; }
+.boardbatch { flex: none; min-height: 28px; line-height: 28px; padding: 0 14px; font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--line); }
+.boardbatch[data-brief]:not([data-brief='']) { cursor: pointer; color: var(--accent); }
+.wctop { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.wcrow { min-height: 18px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wctask { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; min-height: 3.9em; }
+.wc .row button:disabled { opacity: .4; cursor: default; }
 .conn.off { color: var(--bad); }
 @media (max-width: 860px) {
   .body { grid-template-columns: 1fr; }
@@ -127,13 +147,14 @@ td button { white-space: nowrap; margin-bottom: 4px; }
   <header>
     <span class="brand">duet</span>
     <span class="proj" id="proj"></span>
-    <span class="chip"><span class="dot" id="rundot"></span><span id="runtxt">대기</span></span>
+    <span class="chip" id="runchip"><span class="dot" id="rundot"></span><span id="runtxt">대기</span></span>
     <span class="chip" title="대화 모드"><select id="mode" style="border:none;background:none;padding:0"></select></span>
     <span class="chip" id="autopilot" title="전권 자동: 승인·선택을 묻지 않고 진행 (push·sudo·시스템 삭제·배포만 막음)" hidden style="color:var(--bad);border-color:var(--bad)">전권 자동</span>
     <span class="chip" id="turns" title="이번 요청 턴 / 한도"></span>
     <span class="chip" id="cost" title="Claude API 환산 비용 (구독이면 실제 청구 아님) · 토큰"></span>
     <span class="grow"></span>
-    <span class="conn" id="conn">연결 중…</span>
+    <span class="chip pbadge zero" id="pendingBadge" title="승인 대기 개수">승인 <b id="pendingBadgeN">0</b></span>
+    <span class="conn" id="conn" title="서버 연결 중">연결 중</span>
     <button id="btnPause">일시정지</button>
     <button id="btnStop" class="danger">현재 턴 중단</button>
   </header>
@@ -150,7 +171,6 @@ td button { white-space: nowrap; margin-bottom: 4px; }
       <div class="ctx" id="ctx"></div>
     </nav>
     <main>
-      <div id="pending"></div>
 
       <section class="view on" id="v-live">
         <div class="live">
@@ -167,10 +187,11 @@ td button { white-space: nowrap; margin-bottom: 4px; }
       </section>
 
       <section class="view" id="v-docs">
-        <div class="colhead"><input id="docFilter" placeholder="문서 경로 필터"><button id="docRefresh">새로고침</button><span id="docPath"></span></div>
+        <div class="doctoolbar" id="docToolbar"><input id="docFilter" placeholder="문서 경로 필터"><button id="docRefresh">새로고침</button><span id="docPath"></span></div>
         <div class="docs-layout"><aside id="docList"></aside><article id="docBody">문서를 선택하세요.</article></div>
       </section>
       <section class="view" id="v-work">
+        <div class="boardbatch" id="boardBatch"></div>
         <div class="board" id="board"></div>
       </section>
 
@@ -236,16 +257,40 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 
 <div class="modal" id="modal"><div class="box"><header><b id="modalTitle"></b><span class="grow"></span><button id="modalClose">닫기</button></header>
   <div class="content"><pre id="modalBody"></pre></div></div></div>
+<div id="pendingTray" class="zero">
+  <div class="trayhead"><span>승인 대기 <b id="pendingCount">0</b></span><span class="grow"></span><button id="pendingToggle">접기</button></div>
+  <div id="pending"></div>
+</div>
 <div class="toast" id="toast"></div>
 
 <style>
-.docs-layout { display:grid;grid-template-columns:minmax(160px,26%) 1fr;height:calc(100% - 50px); }
-#docList,#docBody { overflow:auto;padding:16px;overflow-wrap:anywhere; }
-#docList button { display:block;text-align:left;width:100%;margin:3px 0; }
-#docBody pre { overflow:auto;padding:12px;background:var(--bg);white-space:pre; }
-#docBody blockquote { border-left:3px solid #888;padding-left:12px; }
+.doctoolbar { height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden; }
+#docFilter { width:220px;flex:none; }
+#docRefresh { flex:none; }
+#docPath { flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--dim);font-family:var(--mono);font-size:12px; }
+.docs-layout { flex:1;min-height:0;display:grid;grid-template-columns:260px minmax(0,1fr);overflow:hidden; }
+#docList,#docBody { min-height:0;overflow:auto; }
+#docList { padding:10px;border-right:1px solid var(--line); }
+#docList h4 { margin:10px 0 4px;font-size:12px;color:var(--dim); }
+#docList button { display:block;text-align:left;width:100%;margin:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+#docBody { padding:16px 24px; }
+.md { max-width:860px;margin:0 auto;min-width:0;overflow-wrap:anywhere;line-height:1.65; }
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6 { margin:1.2em 0 .5em;line-height:1.3; }
+.md h1 { font-size:1.6em; }.md h2 { font-size:1.35em; }.md h3 { font-size:1.15em; }.md h4 { font-size:1.05em; }.md h5 { font-size:1em; }.md h6 { font-size:.95em; }
+.md p,.md ul,.md ol { margin:.6em 0; }
+.md li { margin:.2em 0; }
+.md hr { border:none;border-top:1px solid var(--line);margin:1.2em 0; }
+.md blockquote { margin:.8em 0;border-left:3px solid var(--line);padding-left:12px;color:var(--dim);overflow-x:auto; }
+.md pre { overflow-x:auto;white-space:pre;max-width:100%;padding:12px;background:var(--bg);border-radius:6px;margin:.8em 0; }
+.md code { white-space:nowrap;font-family:var(--mono);font-size:.92em; }
+.md pre code { white-space:inherit; }
+.md .tablewrap { overflow-x:auto;max-width:100%;margin:.8em 0; }
+.md table { width:auto;min-width:50%; }
+.md th,.md td { padding:6px 10px;border:1px solid var(--line); }
+.md img { max-width:100%;height:auto; }
 .activity-purple { color:#bb9af7; }.activity-red { color:#f7768e; }.activity-yellow { color:#e0af68; }.activity-green { color:#9ece6a; }.activity-muted { color:#999; }
-#activityRoles { display:flex;flex-wrap:wrap;gap:8px;padding:6px; }
+#activityRoles { flex:none;height:32px;display:flex;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;gap:6px;align-items:center;padding:0 8px;border-bottom:1px solid var(--line); }
+.achip { flex:none;width:220px;height:24px;line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--chip);font-size:12px; }
 </style>
 <script src="/static/md.js"></script>
 <script src="/static/activity.js"></script>
@@ -257,29 +302,50 @@ if (token) history.replaceState(null, "", "/");
 let ws, S = null, rid = 0;
 let activityNow = DuetActivity.clock(Date.now()/1000, performance.now()/1000);
 const activityRoles=document.createElement('div');activityRoles.id='activityRoles';$('#v-live').prepend(activityRoles);
+const docButtons=new Map();let docShown=null;
 const docViewer=renderMarkdown.createViewer({
   fetch:async url=>{const res=await fetch(url+(url.includes('?')?'&':'?')+'t='+encodeURIComponent(token));if(!res.ok)throw new Error('문서를 열 수 없습니다 ('+res.status+')');return res.json();},
   setInterval:(f,ms)=>setInterval(f,ms),clearInterval:id=>clearInterval(id),
-  onList:rows=>{const box=$('#docList');box.replaceChildren();let previous='';for(const row of rows){
-    const group=row.path==='DIALOGUE.md'?'대화':row.path.startsWith('docs/')?'docs':row.path.startsWith('.duet/memory/')?'작업 기억':'기타';
-    if(group!==previous){const h=document.createElement('h4');h.textContent=group;box.append(h);previous=group;}
-    const b=document.createElement('button');b.textContent=row.path;b.onclick=()=>docViewer.select(row.path);box.append(b);
-  }},
-  onDocument:doc=>{$('#docPath').textContent=doc.path;$('#docBody').innerHTML=renderMarkdown(doc.content);},
-  onError:e=>{$('#docBody').textContent=e.message;}
+  onList:rows=>{
+    const box=$('#docList'),seen=new Set(rows.map(r=>r.path)),groups=new Set();
+    for(const [path,b] of docButtons)if(!seen.has(path)){b.remove();docButtons.delete(path);}
+    let anchor=null;
+    const place=node=>{const want=anchor?anchor.nextSibling:box.firstChild;if(want!==node)box.insertBefore(node,want);anchor=node;};
+    for(const row of rows){
+      const group=row.path==='DIALOGUE.md'?'대화':row.path.startsWith('docs/')?'docs':row.path.startsWith('.duet/memory/')?'작업 기억':'기타';
+      if(!groups.has(group)){groups.add(group);let h=[...box.children].find(x=>x.tagName==='H4'&&x.dataset.g===group);
+        if(!h){h=document.createElement('h4');h.dataset.g=group;h.textContent=group;}place(h);}
+      let b=docButtons.get(row.path);
+      if(!b){b=document.createElement('button');b.textContent=b.title=row.path;b.onclick=()=>docViewer.select(row.path);docButtons.set(row.path,b);}
+      place(b);
+    }
+    while(anchor?anchor.nextSibling:box.firstChild)(anchor?anchor.nextSibling:box.firstChild).remove();
+  },
+  onDocument:doc=>{
+    const body=$('#docBody'),same=doc.path===docShown,range=body.scrollHeight-body.clientHeight,ratio=same&&range>0?body.scrollTop/range:0;
+    $('#docPath').textContent=$('#docPath').title=doc.path;
+    const md=document.createElement('div');md.className='md';md.innerHTML=renderMarkdown(doc.content);body.replaceChildren(md);
+    docShown=doc.path;body.scrollTop=same?ratio*(body.scrollHeight-body.clientHeight):0;
+  },
+  onError:e=>{docShown=null;$('#docBody').textContent=e.message;}
 });
 $('#docFilter').oninput=e=>docViewer.filter(e.target.value);
 $('#docRefresh').onclick=()=>docViewer.refresh(true);
 $('#docBody').onclick=e=>{const a=e.target.closest('a');if(!a)return;const href=a.getAttribute('href');const path=docViewer.relative(href);if(path){e.preventDefault();docViewer.select(path);}else if(!/^https?:\/\//i.test(href)){e.preventDefault();}};
 
-function activityBadge(a) {const d=DuetActivity.describe(a,activityNow(performance.now()/1000));return `<span class="activity-${d.color}">${esc(d.text)}</span>`;}
+const activityChips=new Map();
 function drawActivity() {
   if(!S)return;
-  const entries=Object.entries(S.status.activity||{});
-  activityRoles.innerHTML=entries.map(([n,a])=>`<span>${esc(n)}: ${activityBadge(a)}</span>`).join('');
-  const active=entries.filter(([n,a])=>!['idle','done'].includes(a.state));
-  if(active.length)$('#runtxt').innerHTML=active.map(([n,a])=>`${esc(n)}: ${activityBadge(a)}`).join(' · ');
-  else $('#runtxt').textContent=S.status.paused?'일시정지':'사람 차례';
+  const entries=Object.entries(S.status.activity||{}),now=activityNow(performance.now()/1000);
+  for(const [n,c] of activityChips)if(!(S.status.activity||{})[n]){c.remove();activityChips.delete(n);}
+  for(const [n,a] of entries){
+    let c=activityChips.get(n);
+    if(!c){c=document.createElement('span');activityChips.set(n,c);activityRoles.append(c);}
+    const d=DuetActivity.describe(a,now),p=DuetActivity.chipParts(n,d),cls='achip activity-'+d.color;
+    if(c.className!==cls)c.className=cls;
+    if(c.textContent!==p.text)c.textContent=p.text;
+    if(c.title!==p.title)c.title=p.title;
+  }
   renderBoard(S.status.work||[]);
 }
 setInterval(drawActivity,1000);
@@ -297,8 +363,8 @@ function toast(text) { if (!text) return; const t = $("#toast"); t.textContent =
 
 function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${token ? "?t=" + encodeURIComponent(token) : ""}`);
-  ws.onopen = () => { $("#conn").textContent = "연결됨"; $("#conn").classList.remove("off"); };
-  ws.onclose = () => { $("#conn").textContent = "연결 끊김 — 재시도 중"; $("#conn").classList.add("off"); setTimeout(connect, 1500); };
+  ws.onopen = () => { const c = $("#conn"); c.textContent = "연결"; c.title = "서버에 연결됨"; c.classList.remove("off"); };
+  ws.onclose = () => { const c = $("#conn"); c.textContent = "끊김"; c.title = "연결 끊김 — 재시도 중"; c.classList.add("off"); setTimeout(connect, 1500); };
   ws.onmessage = m => onMessage(JSON.parse(m.data));
 }
 
@@ -309,7 +375,7 @@ function onMessage(msg) {
       setState(msg.state);
       msg.history.forEach(e => onEvent(e, true));
       scrollEnd($("#flow")); scrollEnd($("#stream"));
-      $("#pending").innerHTML = ""; (msg.state.pending || []).forEach(showPending);
+      $("#pending").innerHTML = ""; (msg.state.pending || []).forEach(showPending); updateBadges();
       break;
     case "event": onEvent(msg); break;
     case "state": setState(msg.state); break;
@@ -340,7 +406,8 @@ function renderStatus(s) {
   const run = s.running || (s.busy ? "진행 중" : null);
   $("#rundot").className = "dot" + (s.paused ? " pause" : run ? " run" : "");
   const working = (s.work || []).filter(w => !["merged", "failed", "cancelled"].includes(w.status) && !w.status.startsWith("waiting") && w.status !== "queued").length;
-  $("#runtxt").textContent = s.paused ? "일시정지" : (run ? `${run} 작업 중` : "사람 차례") + (working ? ` · 병렬 ${working}` : "") + (s.pending_approvals ? ` · 승인 대기 ${s.pending_approvals}` : "");
+  const summary = s.paused ? "일시정지" : (run ? `${run} 작업 중` : "사람 차례") + (working ? ` · 병렬 ${working}` : "") + (s.pending_approvals ? ` · 승인 대기 ${s.pending_approvals}` : "");
+  $("#runtxt").textContent = summary; $("#runtxt").title = summary;
   $("#btnPause").textContent = s.paused ? "재개" : "일시정지";
   $("#autopilot").hidden = !s.full_auto;
   $("#turns").textContent = `턴 ${s.run_turns}/${s.max_turns == null ? "∞" : s.max_turns}`;
@@ -440,13 +507,70 @@ function showPending(p) {
     el.querySelectorAll("button").forEach((b, i) => { if (i === 0) b.classList.add("primary"); b.onclick = () => send({type: "answer", id: p.id, key: b.dataset.k}); });
   }
   $("#pending").appendChild(el);
+  $("#pendingTray").classList.remove("collapsed"); $("#pendingToggle").textContent = "접기";
   updateBadges();
   if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("duet", {body: x.summary || x.title});
 }
-function updateBadges() {}
+function updateBadges() {
+  const n = $("#pending").children.length;
+  setText($("#pendingCount"), n); setText($("#pendingBadgeN"), n);
+  $("#pendingTray").classList.toggle("zero", !n); $("#pendingBadge").classList.toggle("zero", !n);
+}
 
 // ---------------- 작업 보드 ----------------
+const boardCards = new Map(), boardLanes = {};
+const mk = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const setText = (e, t) => { t = String(t); if (e.textContent !== t) e.textContent = t; };
+function boardSkeleton() {
+  const board = $("#board");
+  if (board.dataset.ready) return;
+  board.dataset.ready = "1";
+  board.append(boardLanes.empty = mk("div", "help", `병렬 작업이 없습니다. 설계자가 duet-work 블록으로 작업을 나누면 여기에 나타납니다. 역할별 병렬 최대치는 "역할·모델"에서 정합니다.`));
+  boardLanes.empty.style.gridColumn = "1/-1";
+  for (const name of ["대기", "진행", "완료", "중단"]) {
+    const lane = mk("div", "lane"), h = mk("h3"), cards = mk("div", "cards");
+    lane.append(h, cards); board.append(lane); boardLanes[name] = {h, cards};
+  }
+}
+function boardCard(id) {
+  const c = {el: mk("div", "card wc")}, top = mk("div", "wctop");
+  c.id = mk("span", "id"); c.role = mk("span", "pill"); c.status = mk("span", "pill");
+  top.append(c.id, c.role, c.status);
+  c.sessions = mk("div", "wcrow"); c.task = mk("div", "wcrow wctask");
+  c.deps = mk("div", "help wcrow"); c.files = mk("div", "help mono wcrow");
+  c.wait = mk("div", "help wcrow"); c.wait.style.color = "var(--warn)"; c.merged = mk("div", "help mono wcrow");
+  const row = mk("div", "row");
+  c.open = mk("button", null, "기록"); c.resume = mk("button", null, "재개"); c.cancel = mk("button", "danger", "취소");
+  row.append(c.open, c.resume, c.cancel);
+  c.el.append(top, c.sessions, c.task, c.deps, c.files, c.wait, c.merged, row);
+  c.open.onclick = () => send({type: "read", path: c.thread});
+  c.resume.onclick = () => send({type: "work", action: "resume", id});
+  c.cancel.onclick = () => { if (confirm(id + " 작업을 취소할까요? 워크트리와 작업 브랜치가 지워집니다.")) send({type: "work", action: "cancel", id}); };
+  return c;
+}
+function updateCard(c, w) {
+  c.thread = w.thread;
+  setText(c.id, w.id); setText(c.role, w.role); c.role.style.color = colorOf(w.role);
+  setText(c.status, w.status); const cls = "pill " + w.status.split(":")[0]; if (c.status.className !== cls) c.status.className = cls;
+  const now = activityNow(performance.now()/1000);
+  const ss = (S.status.work_sessions || []).filter(x => x.id === w.id).map(x => { const d = DuetActivity.describe(x, now); return {t: `${x.role} · ${d.text}`, title: d.title}; });
+  setText(c.sessions, ss.length ? ss.map(x => x.t).join(" / ") : "세션 —"); c.sessions.title = ss.map(x => x.title).join("\n");
+  setText(c.task, short(w.task, 220)); c.task.title = w.task || "";
+  setText(c.deps, "의존: " + ((w.depends_on || []).join(", ") || "—"));
+  setText(c.files, "파일: " + ((w.agreed_files || []).join(" · ") || "—"));
+  setText(c.wait, "대기 사유: " + (w.wait_reason ? short(w.wait_reason, 300) : "—")); c.wait.title = w.wait_reason || "";
+  setText(c.merged, "병합: " + (w.merged_commit ? w.merged_commit.slice(0, 9) : "—"));
+  c.resume.disabled = !w.status.startsWith("waiting");
+  c.cancel.disabled = ["merged", "failed", "cancelled"].includes(w.status);
+}
+function renderBatch() {
+  const box = $("#boardBatch"), b = S && S.status ? S.status.work_batch : null;
+  if (!b) { setText(box, ""); box.dataset.brief = ""; return; }
+  setText(box, `배치 ${b.n ?? "?"} · ${b.goal || "—"} · ${b.done ?? 0}/${b.total ?? 0}` + (b.brief ? ` · 브리프 ${b.brief}` : ""));
+  box.title = box.textContent; box.dataset.brief = b.brief || "";
+}
 function renderBoard(items) {
+  boardSkeleton(); renderBatch();
   const lanes = {"대기": [], "진행": [], "완료": [], "중단": []};
   items.forEach(w => {
     const s = w.status;
@@ -456,25 +580,23 @@ function renderBoard(items) {
     else lanes["진행"].push(w);
   });
   const attention = items.filter(w => w.status.startsWith("waiting") || w.status === "failed").length;
-  const b = $("#workBadge"); b.hidden = !attention; b.textContent = attention;
-  if (!items.length) { $("#board").innerHTML = `<div class="help" style="grid-column:1/-1">병렬 작업이 없습니다. 설계자가 duet-work 블록으로 작업을 나누면 여기에 나타납니다. 역할별 병렬 최대치는 "역할·모델"에서 정합니다.</div>`; return; }
-  $("#board").innerHTML = Object.entries(lanes).map(([name, ws]) => `<div class="lane"><h3>${name} · ${ws.length}</h3><div class="cards">` + ws.map(w => {
-    const cls = w.status.split(":")[0];
-    return `<div class="card wc"><div style="display:flex;gap:8px;align-items:center"><span class="id">${esc(w.id)}</span>
-      <span class="pill" style="color:${colorOf(w.role)}">${esc(w.role)}</span><span class="pill ${cls}">${esc(w.status)}</span></div>
-      ${(S.status.work_sessions||[]).filter(x=>x.id===w.id).map(x=>`<div>${esc(x.role)}: ${activityBadge(x)}</div>`).join('')}
-      <div style="margin-top:6px">${esc(short(w.task, 220))}</div>
-      ${w.depends_on.length ? `<div class="help">의존: ${w.depends_on.map(esc).join(", ")}</div>` : ""}
-      ${w.agreed_files.length ? `<div class="help mono">${w.agreed_files.map(esc).join(" · ")}</div>` : ""}
-      ${w.wait_reason ? `<div class="help" style="color:var(--warn)">${esc(short(w.wait_reason, 300))}</div>` : ""}
-      ${w.merged_commit ? `<div class="help mono">병합 ${esc(w.merged_commit.slice(0, 9))}</div>` : ""}
-      <div class="row"><button data-open="${esc(w.thread)}">기록</button>
-      ${w.status.startsWith("waiting") ? `<button data-resume="${esc(w.id)}">재개</button>` : ""}
-      ${!["merged", "failed", "cancelled"].includes(w.status) ? `<button class="danger" data-cancel="${esc(w.id)}">취소</button>` : ""}</div></div>`;
-  }).join("") + "</div></div>").join("");
-  $("#board").querySelectorAll("[data-open]").forEach(x => x.onclick = () => send({type: "read", path: x.dataset.open}));
-  $("#board").querySelectorAll("[data-resume]").forEach(x => x.onclick = () => send({type: "work", action: "resume", id: x.dataset.resume}));
-  $("#board").querySelectorAll("[data-cancel]").forEach(x => x.onclick = () => { if (confirm(x.dataset.cancel + " 작업을 취소할까요? 워크트리와 작업 브랜치가 지워집니다.")) send({type: "work", action: "cancel", id: x.dataset.cancel}); });
+  const b = $("#workBadge"); b.hidden = !attention; setText(b, attention);
+  boardLanes.empty.hidden = !!items.length;
+  const ids = new Set(items.map(w => w.id));
+  for (const [id, c] of boardCards) if (!ids.has(id)) { c.el.remove(); boardCards.delete(id); }
+  for (const [name, ws] of Object.entries(lanes)) {
+    const lane = boardLanes[name];
+    setText(lane.h, `${name} · ${ws.length}`);
+    let anchor = null;
+    for (const w of ws) {
+      let c = boardCards.get(w.id);
+      if (!c) { c = boardCard(w.id); boardCards.set(w.id, c); }
+      updateCard(c, w);
+      const want = anchor ? anchor.nextSibling : lane.cards.firstChild;
+      if (want !== c.el) lane.cards.insertBefore(c.el, want);
+      anchor = c.el;
+    }
+  }
 }
 
 // ---------------- 역할·모델 ----------------
@@ -562,6 +684,7 @@ document.querySelectorAll("#nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.id === "v-" + b.dataset.v));
   $("#composer").style.display = ["live", "work"].includes(b.dataset.v) ? "" : "none";
+  trackComposer();
   docViewer.setOpen(b.dataset.v==='docs');
 });
 function sendInput() {
@@ -575,6 +698,15 @@ $("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shift
 $("#askSend").onclick = sendAsk;
 $("#askInput").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendAsk(); } });
 $("#askReset").onclick = () => { send({type: "ask_reset", role: $("#askRole").value}); $("#askLog").innerHTML = ""; };
+function trackComposer() {
+  const h = Math.max(0, ...[...document.querySelectorAll(".composer")].map(c => c.offsetParent ? c.offsetHeight : 0));
+  document.documentElement.style.setProperty("--composer-h", (h || 16) + "px");
+}
+if ("ResizeObserver" in window) { const ro = new ResizeObserver(trackComposer); document.querySelectorAll(".composer").forEach(c => ro.observe(c)); }
+window.addEventListener("resize", trackComposer); trackComposer();
+$("#pendingToggle").onclick = () => { const t = $("#pendingTray"); t.classList.toggle("collapsed"); $("#pendingToggle").textContent = t.classList.contains("collapsed") ? "펴기" : "접기"; };
+$("#pendingBadge").onclick = () => { const t = $("#pendingTray"); t.classList.remove("collapsed"); $("#pendingToggle").textContent = "접기"; };
+$("#boardBatch").onclick = () => { const b = $("#boardBatch").dataset.brief; if (!b) return; document.querySelector('#nav button[data-v="docs"]').click(); docViewer.select(b); };
 $("#btnPause").onclick = () => send({type: "control", action: S && S.status.paused ? "resume" : "pause"});
 $("#btnStop").onclick = () => send({type: "control", action: "stop"});
 $("#mode").onchange = e => {

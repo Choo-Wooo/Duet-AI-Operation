@@ -66,7 +66,7 @@
         const headers=cells(line); i+=2;
         let table='<table><thead><tr>'+headers.map(x=>'<th>'+inline(x)+'</th>').join('')+'</tr></thead><tbody>';
         while(i<lines.length && lines[i].includes('|') && lines[i].trim()) table+='<tr>'+cells(lines[i++]).map(x=>'<td>'+inline(x)+'</td>').join('')+'</tr>';
-        out.push(table+'</tbody></table>'); continue;
+        out.push('<div class="tablewrap">'+table+'</tbody></table></div>'); continue;
       }
       const p=[line]; i++;
       while(i<lines.length && lines[i].trim() && !fence(lines[i]) && !list(lines[i]) && !/^\s*(?:#|>|---)/.test(lines[i])) p.push(lines[i++]);

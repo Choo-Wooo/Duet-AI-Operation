@@ -5,14 +5,14 @@ from duet.tests.test_agreement import orch
 from duet.tests.test_markdown import node, STATIC
 
 
-@pytest.mark.parametrize('age,state,word', [(59,'thinking','처리 중'),(60,'tool','응답 대기'),
-    (299,'reviewing','응답 대기'),(300,'starting','멈춘 것 같음'),(900,'awaiting_approval','승인 대기'),
-    (900,'idle','대기'),(900,'done','완료'),(900,'error','오류')])
-def test_web_tui_activity_clock_boundaries(age, state, word):
+@pytest.mark.parametrize('age,state,word,web', [(59,'thinking','처리 중','처리 중'),(60,'tool','응답 대기','응답 대기'),
+    (299,'reviewing','응답 대기','응답 대기'),(300,'starting','멈춘 것 같음','멈춤 의심'),(900,'awaiting_approval','승인 대기','승인 대기'),
+    (900,'idle','대기','대기'),(900,'done','완료','대기'),(900,'error','오류','턴 중단')])
+def test_web_tui_activity_clock_boundaries(age, state, word, web):
     a = {'state':state,'last_event_at':100,'turn_started_at':90,'detail':'Read'}
-    text = node("const a=require(process.argv[1]);const c=a.clock(100,9000);process.stdout.write(a.describe(JSON.parse(process.argv[2]),c(9000+Number(process.argv[3]))).text);",
+    text = node("const a=require(process.argv[1]);const c=a.clock(100,9000);process.stdout.write(a.describe(JSON.parse(process.argv[2]),c(9000+Number(process.argv[3]))).label);",
                 str(STATIC/'activity.js'), json.dumps(a), str(age))
-    assert word in text
+    assert text == web
     from duet.tui.app import activity_label
     assert word in activity_label(a, 100+age)[0]
 
