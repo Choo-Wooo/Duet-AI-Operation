@@ -181,3 +181,38 @@ def test_presets_and_existing_project_fill(tmp_path):
     info = {p["key"]: p for p in presets_info({"codex": 1})}
     assert info["tester"]["available"] and info["tester"]["cli"] == "codex" and info["tester"]["effort"] == "medium"
     assert info["designer"]["cli"] == "codex" and info["designer"]["available"]
+
+
+def test_role_guides_per_cli_and_tool_upgrade(tmp_path):
+    from duet.core.config import ensure_preset_roles
+    from duet.core.role_guides import role_guide
+    g = role_guide(Role("designer", "claude"))
+    assert "/design" in g and "문서 디자인" in g and "에셋" in g and "mcp__playwright__" in g
+    assert "generate_image" in role_guide(Role("designer#ui", "agy"))  # 병렬 세션 이름도 역할로 인식
+    assert "search_web" in role_guide(Role("researcher", "agy")) and "WebSearch" in role_guide(Role("researcher", "claude"))
+    assert "/security-review" in role_guide(Role("reviewer", "claude"))
+    assert "보조 에이전트" in role_guide(Role("architect", "claude"))  # 모든 역할에 CLI 도구 활용 지침
+    # 기존 역할 도구 보강: 설명·모델은 그대로, 도구만 더함 (한 번만)
+    cfg = Config(tmp_path)
+    cfg.dir.mkdir()
+    cfg.roles = {"architect": Role("architect", "claude", permissions="read_only"),
+                 "researcher": Role("researcher", "claude", "m", "내 조사 설명", "read_only"),
+                 "designer": Role("designer", "agy", "g", "내 디자인 설명")}
+    cfg.settings["preset_roles_added"] = ["designer", "researcher"]
+    cfg.save_roles()
+    cfg.load()
+    msgs = ensure_preset_roles(cfg, {"claude": 1, "agy": 1})
+    assert cfg.roles["researcher"].auto_tools == ["WebSearch", "WebFetch"] and cfg.roles["researcher"].brief == "내 조사 설명"
+    assert "capture_browser_screenshot" in cfg.roles["designer"].auto_tools and cfg.roles["designer"].model == "g"
+    assert len(msgs) == 2 and ensure_preset_roles(cfg, {"claude": 1}) == []
+
+
+def test_agy_designer_browser_allowed_in_plan(tmp_path):
+    p = Policy(tmp_path, DEFAULT_POLICY, "architect")
+    p.task = {"phase": "plan", "waiting": False, "test_command": ""}
+    from duet.adapters.agy import to_request
+    from duet.core.config import preset_role
+    r = preset_role("designer", {"agy": 1})
+    assert p.classify(to_request("designer", "capture_browser_screenshot", {}), r)[0] == AUTO
+    r2 = preset_role("researcher", {"agy": 1})
+    assert Policy(tmp_path, DEFAULT_POLICY, "architect").classify(to_request("researcher", "search_web", {"query": "x"}), r2)[0] == AUTO

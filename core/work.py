@@ -467,7 +467,7 @@ class WorkBoard:
         role = self._worker_role(it)
         from .prompts import role_guide
         system = WORK_SYSTEM.format(role=it.role, id=it.id, brief=role.brief, branch=f"duet/work/{it.id}",
-                                    base=self.base) + role_guide(it.role)
+                                    base=self.base) + role_guide(role)
         pol = Policy(path, self.cfg.policy, self.cfg.main)
         ad = make_adapter(role, path, self.orch.bus, lambda req: self._approve(it, pol, req), it.session_id,
                           system, fake=self.orch.fake)

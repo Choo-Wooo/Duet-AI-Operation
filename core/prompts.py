@@ -54,32 +54,8 @@ verify에서 메인은 테스트 방법을 검토하고 합의 명령을 직접 
 각 지시문은 <!-- duet: 지시문 인자 --> 형식입니다. 매 턴의 단계별 안내가 일반 권한/기록 규칙보다 우선합니다.
 """
 
-DESIGN_GUIDE = """
-## 디자인 작업 방법 (designer)
-1. 먼저 보기: 기존 UI 코드의 스타일 토큰(CSS 변수·테마·Tailwind 설정)·공통 컴포넌트·docs/design/ 을 읽는다.
-   디자인 시스템 문서가 없으면 docs/design/system.md 에 색(역할별)·타이포 스케일·간격 단위·모서리·그림자·컴포넌트 규칙을 먼저 정한다.
-2. 방향 비교: 새 화면·큰 변경은 서로 다른 방향 2~3개를 짧게 비교하고 하나를 고른 근거를 남긴다.
-   Claude Code 의 `/design` 스킬(Skill 도구)을 쓸 수 있으면 시안 비교에 활용한다. 사람 선택이 필요 없게 스스로 고른다.
-3. 구현: 기존 컴포넌트·토큰을 재사용하고 임의의 색·px 값을 흩뿌리지 않는다. 위계(크기·굵기·색 대비)와 정렬·여백 리듬을 먼저 잡는다.
-4. 눈으로 확인 (필수): 브라우저 도구(mcp__playwright__*)로 화면을 실제로 열어 데스크톱(1440)·모바일(390) 폭 스크린샷을 찍고 본다.
-   라이트/다크, 빈 상태·긴 텍스트·오류·로딩 상태도 확인한다. 스크린샷을 보고 어긋난 정렬·간격·잘림·대비를 고치는 과정을 최소 2번 반복한다.
-   정적 파일은 file:// 로, 앱은 개발 서버를 백그라운드로 띄워 연다. 스크린샷은 docs/design/shots/ 에 저장한다.
-5. 접근성: 본문 대비 4.5:1 이상, 키보드 포커스 표시, 버튼·입력의 레이블, 터치 영역 44px.
-6. 보고: 고른 방향과 근거, 바꾼 파일, 확인한 스크린샷 경로, 남은 다듬을 점.
-"""
+from .role_guides import role_guide  # noqa: E402  (역할·CLI별 작업 방법과 도구 지침)
 
-RESEARCH_GUIDE = """
-## 조사 작업 방법 (researcher)
-- 공식 문서·저장소·릴리스 노트를 우선하고, 주장마다 출처 URL 과 확인 날짜를 붙인다. 추측은 추측이라고 쓴다.
-- 선택지는 표로 비교(장단점·성숙도·라이선스·유지보수 상태)하고 이 프로젝트에 맞는 추천과 이유를 쓴다.
-- 결과는 docs/research/<주제>.md 에 쓰고, 채팅 응답에는 핵심 결론과 경로만 남긴다.
-"""
-
-ROLE_GUIDES = {"designer": DESIGN_GUIDE, "researcher": RESEARCH_GUIDE}
-
-
-def role_guide(role_name: str) -> str:
-    return ROLE_GUIDES.get(role_name.split("#", 1)[0], "")
 
 
 PERM_TEXT = {
@@ -135,7 +111,7 @@ def system_append(cfg: Config, role: Role) -> str:
     if is_main:
         from .work import PARALLEL_SYSTEM
         directives += PARALLEL_SYSTEM.replace("{max_parallel}", str(cfg.settings.get("max_parallel", 4)))
-    return (common + BACKGROUND_WAIT + directives + role_guide(role.name) + MEMORY_SYSTEM.replace("{role}", role.name)
+    return (common + BACKGROUND_WAIT + directives + role_guide(role) + MEMORY_SYSTEM.replace("{role}", role.name)
             + (AGREEMENT_SYSTEM if cfg.mode.agreement or cfg.state.task else ""))
 
 

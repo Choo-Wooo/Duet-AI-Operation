@@ -302,10 +302,9 @@ ROLE_PRESETS: dict[str, dict] = {
     "designer": dict(
         label="디자이너", clis=("claude", "codex", "agy"),
         models={"claude": DESIGNER_MODEL, "codex": DEFAULT_MODELS["codex"], "agy": "gemini-3.1-pro-high"},
-        brief="화면·UX·API 형태·데이터 모델을 설계하고 시안(docs/design/, 목업 코드, 스타일)을 만든다. "
-              "구현자와 인터페이스를 맞추고, 결정 근거를 문서로 남긴다.",
-        permissions="workspace_write", max_sessions=2, context_limit=300000,
-        auto_tools=["mcp__playwright__*"], mcp=PLAYWRIGHT_MCP),
+        brief="사람이 보고 쓰는 모든 것의 디자인을 맡는다: 화면(UI/UX)·문서(README·설계서·보고서)·시각 에셋(아이콘·스킨·텍스처)·"
+              "데이터 시각화. 디자인 시스템과 문서 서식을 정하고, 시안을 비교해 고른 뒤 만들고, 렌더링한 결과를 이미지로 확인하며 다듬는다.",
+        permissions="workspace_write", max_sessions=2, context_limit=300000),
     "researcher": dict(
         label="리서처", clis=("agy", "claude", "codex"),
         models={"agy": RESEARCHER_MODEL, "claude": DEFAULT_MODELS["claude"], "codex": DEFAULT_MODELS["codex"]},
@@ -332,6 +331,14 @@ ROLE_PRESETS: dict[str, dict] = {
 AUTO_PRESET_ROLES = ("designer", "researcher")
 
 
+def preset_tools(key: str, cli: str) -> tuple[list[str], dict]:
+    """역할 × CLI 에 맞는 자동 허용 도구와 역할 전용 MCP (브라우저 도구가 필요하면 Claude 에 Playwright MCP)."""
+    from .role_guides import PRESET_TOOLS
+    tools = list(PRESET_TOOLS.get((key, cli), []))
+    mcp = dict(PLAYWRIGHT_MCP) if cli == "claude" and any(t.startswith("mcp__playwright__") for t in tools) else {}
+    return tools, mcp
+
+
 def preset_role(key: str, clis, name: str | None = None, cli: str | None = None,
                 model: str | None = None) -> Role | None:
     """프리셋으로 역할을 만든다. cli 를 주지 않으면 설치된 CLI 중 선호 순서대로 고른다."""
@@ -341,11 +348,10 @@ def preset_role(key: str, clis, name: str | None = None, cli: str | None = None,
     cli = cli if cli in SUPPORTED_CLIS else next((c for c in p["clis"] if c in clis), None)
     if not cli:
         return None
+    tools, mcp = preset_tools(key, cli)
     return Role(name or key, cli, model or p["models"].get(cli) or DEFAULT_MODELS[cli], p["brief"], p["permissions"],
                 p.get("effort") if cli == "codex" else None, context_limit=p.get("context_limit"),
-                max_sessions=p.get("max_sessions", 1),
-                auto_tools=list(p.get("auto_tools") or []) if cli == "claude" else [],
-                mcp=dict(p.get("mcp") or {}) if cli == "claude" else {})
+                max_sessions=p.get("max_sessions", 1), auto_tools=tools, mcp=mcp)
 
 
 def presets_info(clis) -> list[dict]:
@@ -355,14 +361,18 @@ def presets_info(clis) -> list[dict]:
         out.append({"key": key, "label": p["label"], "available": r is not None,
                     "cli": r.cli if r else None, "model": r.model if r else None,
                     "brief": p["brief"], "permissions": p["permissions"], "max_sessions": p.get("max_sessions", 1),
-                    "effort": r.effort if r else None, "tools": bool(p.get("mcp"))})
+                    "effort": r.effort if r else None, "tools": bool(r and (r.auto_tools or r.mcp))})
     return out
 
 
+ROLE_TOOLS_VERSION = 1
+
+
 def ensure_preset_roles(cfg: "Config", clis) -> list[str]:
-    """기존 프로젝트에 기본 역할(디자이너·리서처)이 없으면 한 번만 채워 넣는다.
-    사람이 지운 역할은 다시 넣지 않는다 (settings.preset_roles_added 에 기록).
-    이미 있는 디자이너 역할에는 브라우저 도구(Playwright MCP)만 더한다."""
+    """기존 프로젝트 보강 (한 번씩만):
+    - 기본 역할(디자이너·리서처)이 없으면 추가. 사람이 지운 역할은 다시 넣지 않는다 (settings.preset_roles_added).
+    - 프리셋 이름의 역할에 그 CLI 에 맞는 도구(자동 허용·Playwright MCP)를 더한다. 설명·모델은 건드리지 않는다
+      (settings.role_tools_version)."""
     msgs: list[str] = []
     done = list(cfg.settings.get("preset_roles_added") or [])
     changed = False
@@ -371,18 +381,27 @@ def ensure_preset_roles(cfg: "Config", clis) -> list[str]:
             continue
         done.append(key)
         changed = True
-        if key in cfg.roles:
-            r = cfg.roles[key]
-            if key == "designer" and r.cli == "claude" and not r.mcp and not r.auto_tools:
-                r.mcp, r.auto_tools = dict(PLAYWRIGHT_MCP), ["mcp__playwright__*"]
-                msgs.append("designer 역할에 브라우저 도구(Playwright MCP)를 붙였습니다 (스크린샷으로 화면 확인).")
-            continue
-        r = preset_role(key, clis)
-        if r:
-            cfg.roles[key] = r
-            msgs.append(f"{ROLE_PRESETS[key]['label']} 역할을 추가했습니다: {key}={r.cli}/{r.model} (역할·모델 화면에서 변경·삭제)")
+        if key not in cfg.roles:
+            r = preset_role(key, clis)
+            if r:
+                cfg.roles[key] = r
+                msgs.append(f"{ROLE_PRESETS[key]['label']} 역할을 추가했습니다: {key}={r.cli}/{r.model} (역할·모델 화면에서 변경·삭제)")
     if changed:
         cfg.settings["preset_roles_added"] = done
+    if int(cfg.settings.get("role_tools_version") or 0) < ROLE_TOOLS_VERSION:
+        for r in cfg.roles.values():
+            if r.name not in ROLE_PRESETS:
+                continue
+            tools, mcp = preset_tools(r.name, r.cli)
+            add = [t for t in tools if t not in r.auto_tools]
+            new_mcp = {k: v for k, v in mcp.items() if k not in r.mcp}
+            if add or new_mcp:
+                r.auto_tools = list(r.auto_tools) + add
+                r.mcp = {**r.mcp, **new_mcp}
+                msgs.append(f"{r.name} 역할에 역할 도구를 붙였습니다: {', '.join(add + list(new_mcp))}")
+        cfg.settings["role_tools_version"] = ROLE_TOOLS_VERSION
+        changed = True
+    if changed:
         cfg.save_roles()
     return msgs
 
