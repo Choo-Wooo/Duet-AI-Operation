@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main, v2]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      # 테스트는 `import duet` 을 쓰므로 duet/ 폴더로 받는다 (실제 사용 형태와 같음: <프로젝트>/duet)
+      - uses: actions/checkout@v4
+        with:
+          path: duet
+      - uses: astral-sh/setup-uv@v6
+      - name: git
+        run: |
+          git --version
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+          git config --global init.defaultBranch main
+      - name: 의존성 (requirements.lock)
+        run: |
+          uv venv --python ${{ matrix.python }} .venv
+          uv pip install --python .venv -r duet/requirements.lock -r duet/requirements-dev.txt
+      - name: 테스트
+        run: .venv/bin/python -m pytest -q duet/tests
+
+  install:
+    name: install.sh / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - name: install.sh (현재 커밋을 내려받아 점검)
+        run: |
+          git -C src checkout -q -B ci-install
+          mkdir project && cd project
+          DUET_REPO="$GITHUB_WORKSPACE/src" DUET_REF=ci-install bash ../src/install.sh
+          test -f duet/__main__.py
+      - name: 첫 실행 (가상환경 생성 + requirements.lock 설치 + 재실행)
+        run: |
+          cd project
+          python3 duet --help
+          test -f .duet/venv/.duet-requirements
+          .duet/venv/bin/python -c "import claude_agent_sdk, textual, yaml, aiohttp"

@@ -422,5 +422,5 @@ def test_r1_unsupported_git_rejects_parallel_before_probe(repo, monkeypatch):
         return original(*args,**kwargs)
     monkeypatch.setattr(wt,'git',version)
     before=git(root,'worktree','list','--porcelain')
-    assert '2.38' in (wt.check_ready() or '')
+    assert '2.45' in (wt.check_ready() or '')
     assert git(root,'worktree','list','--porcelain')==before

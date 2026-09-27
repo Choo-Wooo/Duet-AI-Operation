@@ -1,7 +1,9 @@
 """실행 환경 자동 준비 (표준 라이브러리만 사용).
 
 1. 파이썬 3.10 이상을 찾는다 (현재 인터프리터 → PATH의 python3.1x → Homebrew → uv).
-2. <프로젝트>/.duet/venv 가상환경을 만들고 requirements.txt 를 설치한다.
+2. <프로젝트>/.duet/venv 가상환경을 만들고 의존성을 설치한다.
+   검증된 버전을 고정한 requirements.lock 을 먼저 쓰고, 그 플랫폼에서 실패하면 requirements.txt(범위 지정)로 다시 시도한다.
+   uv 가 있으면 uv 로 설치한다 (빠르고, 파이썬 3.10+ 이 없으면 uv 가 받아 온다).
 3. 설치 내용이 바뀌었을 때만 다시 설치한다 (해시 비교).
 4. 그 가상환경의 파이썬으로 duet 을 다시 실행한다 (os.execv).
 """
@@ -61,41 +63,58 @@ def _find_python():
 
 
 def _requirements_hash(req_file):
-    data = req_file.read_bytes() if req_file.exists() else b""
+    lock = req_file.with_name("requirements.lock")
+    data = (req_file.read_bytes() if req_file.exists() else b"") + (lock.read_bytes() if lock.exists() else b"")
     return hashlib.sha256(data + sys.platform.encode()).hexdigest()[:16]
 
 
 def _create_venv(venv):
     py = _find_python()
+    uv = shutil.which("uv")
+    if py and uv:  # uv 가 있으면 venv 모듈(python3-venv 패키지) 없이도 만들 수 있다
+        _say("가상환경을 만듭니다: %s (python %s, uv)" % (venv, ".".join(map(str, _py_version(py)))))
+        subprocess.run([uv, "venv", "-q", "--python", py, str(venv)], check=True)
+        return "uv"
     if py:
         _say("가상환경을 만듭니다: %s (python %s)" % (venv, ".".join(map(str, _py_version(py)))))
-        subprocess.run([py, "-m", "venv", str(venv)], check=True)
+        r = subprocess.run([py, "-m", "venv", str(venv)])
+        if r.returncode != 0:
+            _say("venv 모듈이 없습니다. Debian·Ubuntu 는 sudo apt install python3-venv, 또는 uv 를 설치하세요:")
+            _say("  curl -LsSf https://astral.sh/uv/install.sh | sh")
+            sys.exit(1)
         return "pip"
-    uv = shutil.which("uv")
     if uv:
         _say("파이썬 3.10+ 이 없어 uv 로 파이썬 3.12 가상환경을 만듭니다.")
         subprocess.run([uv, "venv", "--python", "3.12", str(venv)], check=True)
         return "uv"
     _say("파이썬 3.10 이상이 필요합니다. 다음 중 하나를 설치한 뒤 다시 실행하세요.")
-    _say("  brew install python@3.12      (Homebrew)")
-    _say("  curl -LsSf https://astral.sh/uv/install.sh | sh   (uv)")
+    _say("  curl -LsSf https://astral.sh/uv/install.sh | sh   (uv, 권장: 파이썬을 자동으로 받아 씀)")
+    _say("  brew install python@3.12      (macOS Homebrew)")
+    _say("  sudo apt install python3.12 python3.12-venv   (Debian·Ubuntu)")
+    _say("환경 점검: python3 duet --doctor")
     sys.exit(1)
+
+
+def _install_cmd(vpy, req, installer):
+    uv = shutil.which("uv")
+    if uv and (installer == "uv" or os.environ.get("DUET_USE_PIP") != "1"):
+        return [uv, "pip", "install", "-q", "--python", str(vpy), "-r", str(req)]
+    return [str(vpy), "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", str(req)]
 
 
 def _install(venv, req_file, installer):
     vpy = _venv_python(venv)
     _say("의존성을 설치합니다 (처음 한 번만, 1~2분 걸릴 수 있습니다)...")
-    if installer == "uv" or not _has_pip(vpy):
-        uv = shutil.which("uv")
-        if uv:
-            cmd = [uv, "pip", "install", "--python", str(vpy), "-r", str(req_file)]
-        else:
-            subprocess.run([str(vpy), "-m", "ensurepip", "--upgrade"], check=True)
-            cmd = [str(vpy), "-m", "pip", "install", "-q", "-r", str(req_file)]
-    else:
-        subprocess.run([str(vpy), "-m", "pip", "install", "-q", "--upgrade", "pip"], check=False)
-        cmd = [str(vpy), "-m", "pip", "install", "-q", "-r", str(req_file)]
-    subprocess.run(cmd, check=True)
+    if not shutil.which("uv") and not _has_pip(vpy):
+        subprocess.run([str(vpy), "-m", "ensurepip", "--upgrade"], check=True)
+    lock = req_file.with_name("requirements.lock")
+    if lock.exists():
+        try:
+            subprocess.run(_install_cmd(vpy, lock, installer), check=True)
+            return
+        except subprocess.CalledProcessError:
+            _say("고정 버전(requirements.lock) 설치에 실패해 범위 지정(requirements.txt)으로 다시 시도합니다.")
+    subprocess.run(_install_cmd(vpy, req_file, installer), check=True)
 
 
 def _has_pip(vpy):
@@ -125,6 +144,7 @@ def ensure_environment(duet_dir, project_dir, argv):
             marker.write_text(want)
     except subprocess.CalledProcessError as e:
         _say("환경 준비에 실패했습니다: %s" % e)
+        _say("원인 확인: python3 duet --doctor   (네트워크·파이썬·uv 상태를 점검합니다)")
         _say("문제가 계속되면 .duet/venv 폴더를 지우고 다시 실행하세요.")
         sys.exit(1)
 

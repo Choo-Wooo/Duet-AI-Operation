@@ -82,9 +82,9 @@ class Worktrees:
         if self.prefix:
             version = self.git('--version')
             match = re.search(r'git version (\d+)\.(\d+)', version.stdout)
-            if not match or tuple(map(int, match.groups())) < (2, 38):
-                return '하위 프로젝트 병렬 작업에는 Git 2.38 이상의 merge-tree --write-tree가 필요합니다.'
-            probe_merge = self.git('merge-tree', '--write-tree', '--merge-base=HEAD', 'HEAD', 'HEAD')
+            if not match or tuple(map(int, match.groups())) < (2, 45):
+                return '하위 프로젝트 병렬 작업에는 Git 2.45 이상(merge-tree 가 트리 병합 기준을 받는 버전)이 필요합니다.'
+            probe_merge = self.git('merge-tree', '--write-tree', '--merge-base=HEAD^{tree}', 'HEAD', 'HEAD')
             if probe_merge.returncode:
                 return 'Git merge-tree 범위 병합 사전 점검 실패: ' + (probe_merge.stderr or probe_merge.stdout).strip()
             # Detached probe leaves no branch and never checks out the whole repository.

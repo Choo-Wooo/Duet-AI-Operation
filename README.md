@@ -62,35 +62,70 @@ flowchart LR
 
 | 항목 | 내용 |
 | --- | --- |
-| 운영체제 | macOS, Linux |
-| Python | 3.10 이상 (없으면 Homebrew Python이나 `uv`를 찾아 사용) |
-| git | 턴 스냅샷, 롤백, 병렬 작업에 필요 |
+| 운영체제 | macOS, Linux (Windows는 지원 작업 중) |
+| Python | 3.10 이상. 없으면 `uv`가 파이썬 3.12를 받아 씁니다 |
+| uv | 권장. 의존성 설치가 빠르고 파이썬 버전 문제를 피합니다 (설치 스크립트가 함께 설치) |
+| git | 턴 스냅샷, 롤백, 병렬 작업에 필요. 하위 폴더 프로젝트의 병렬 병합은 2.45 이상 |
 | CLI | `claude`, `codex`, `agy` 중 쓰려는 것이 설치·로그인되어 있어야 합니다 |
 | Node.js | 디자이너의 브라우저 도구(Playwright MCP)를 쓸 때 `npx` 필요 |
 
-CLI 설치:
+CLI 설치 (공식 설치 스크립트, 사용자 권한):
 
 ```bash
-npm i -g @anthropic-ai/claude-code   # Claude Code
-npm i -g @openai/codex               # Codex CLI
-# Antigravity CLI(agy)는 https://antigravity.google 안내에 따라 설치 후 agy 로 로그인
+curl -fsSL https://claude.ai/install.sh | bash               # Claude Code, 설치 후 claude 로 로그인
+curl -fsSL https://chatgpt.com/codex/install.sh | sh         # Codex CLI, 설치 후 codex login
+curl -fsSL https://antigravity.google/cli/install.sh | bash  # Antigravity CLI, 설치 후 agy 로 로그인
 ```
+
+설치 여부, PATH, 로그인 상태는 `python3 duet --doctor`가 한 번에 점검합니다.
 
 ## 설치와 실행
 
-`duet/` 폴더를 작업할 프로젝트 안에 넣고 프로젝트 폴더에서 실행합니다.
+### 설치 스크립트 (macOS, Linux)
+
+작업할 프로젝트 폴더에서 실행합니다. `./duet`에 내려받고, 필요하면 `uv`를 설치한 뒤 환경을 점검합니다.
 
 ```bash
-cp -r duet ~/my-project/
 cd ~/my-project
+curl -fsSL https://raw.githubusercontent.com/Choo-Wooo/Duet-AI-Operation/main/install.sh | bash
+```
 
+이미 `./duet`이 git 클론이면 최신으로 갱신합니다. 환경 변수로 동작을 바꿀 수 있습니다.
+
+| 변수 | 설명 |
+| --- | --- |
+| `DUET_REF` | 브랜치 또는 태그 (기본 `main`) |
+| `DUET_DIR` | 설치 위치 (기본 `./duet`) |
+| `DUET_NO_UV=1` | uv를 설치하지 않고 시스템 파이썬만 사용 |
+| `DUET_FIX=1` | 점검 뒤 고칠 수 있는 항목을 묻지 않고 고침 |
+
+### 직접 설치
+
+```bash
+cd ~/my-project
+git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet
+
+python3 duet --doctor # 환경 점검
 python3 duet --web    # 브라우저 웹 UI (권장)
 python3 duet          # 터미널 분할 화면(TUI)
 ```
 
+### 환경 점검
+
+`python3 duet --doctor`는 가상환경을 만들기 전에 표준 라이브러리만으로 실행되며 다음을 확인합니다.
+
+- 운영체제, root 실행 여부, duet을 돌릴 파이썬(3.10+)과 uv
+- git 버전과 전역 사용자 설정, 프로젝트 저장소 상태(커밋, 브랜치)
+- Node.js(`npx`) 유무
+- `claude`, `codex`, `agy`의 설치 위치, PATH 등록 여부, 버전, 로그인 상태
+- `.duet/roles.yaml`의 역할이 설치되지 않은 CLI를 쓰는지
+- `.duet/venv` 상태와 PyPI 연결
+
+`--fix`를 붙이면 PATH 등록(셸 설정 파일에 한 줄 추가)과 빠진 CLI·uv 설치를 항목마다 물어보고 실행합니다. `--yes`는 묻지 않고 진행하고, `--no-login`은 로그인 확인을 건너뜁니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
+
 처음 실행하면 다음을 자동으로 준비합니다.
 
-1. `.duet/venv` 가상환경과 의존성(claude-agent-sdk, textual, pyyaml, aiohttp). `requirements.txt`가 바뀌면 다시 설치합니다.
+1. `.duet/venv` 가상환경과 의존성(claude-agent-sdk, textual, pyyaml, aiohttp). 검증된 버전을 고정한 `requirements.lock`으로 설치하고, 그 플랫폼에서 실패하면 `requirements.txt`의 범위 지정으로 다시 시도합니다. uv가 있으면 uv로 만들고 설치합니다(`DUET_USE_PIP=1`이면 pip). 두 파일 중 하나가 바뀌면 다시 설치합니다.
 2. 설치된 CLI를 찾아 `.duet/roles.yaml`을 만듭니다. 여러 곳에 설치된 CLI는 가장 최신 버전을 고릅니다.
 3. 각 CLI의 로그인 계정을 확인해 구독인지 API 키 과금인지 알려 줍니다.
 4. `.duet/modes.yaml`, `.duet/policy.yaml`, `DIALOGUE.md`를 만듭니다.
@@ -367,6 +402,7 @@ flowchart LR
 
 | 옵션 | 설명 |
 | --- | --- |
+| `--doctor` | 환경 점검 (`--fix`, `--yes`, `--no-login`) |
 | `--web` | 브라우저 웹 UI로 실행 |
 | `--port <번호>` | 웹 UI 포트 (기본 8765, 사용 중이면 다음 번호) |
 | `--host <주소>` | 웹 UI 주소 (기본 127.0.0.1) |
@@ -440,6 +476,8 @@ docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록
 
 | 증상 | 확인할 것 |
 | --- | --- |
+| 설치·실행이 안 됨 | `python3 duet --doctor`로 원인을 확인하고 `--fix`로 고칠 수 있는 것은 고치세요. |
+| 의존성 설치 실패 | 네트워크·프록시를 확인하고 `.duet/venv`를 지운 뒤 다시 실행하세요. Debian·Ubuntu에서 venv 모듈이 없으면 `sudo apt install python3-venv` 또는 uv를 설치하세요. |
 | `unrecognized arguments: --web` | 프로젝트 안의 `duet/` 폴더가 이전 버전입니다. 최신 코드로 교체하세요. |
 | Claude가 API 오류(버전 미지원)를 냄 | 오래된 `claude`가 PATH에 먼저 잡혀 있을 수 있습니다. duet은 가장 최신 설치본을 고르지만, 시작 안내에 표시된 경로와 버전을 확인하세요. |
 | 비용이 예상보다 큼 | 시작 안내의 계정 표시에서 구독인지 API 키 과금인지 확인하세요. |
@@ -456,8 +494,13 @@ docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록
 .duet/venv/bin/python -m pip install -r duet/requirements-dev.txt
 .duet/venv/bin/python -m pytest -p no:cacheprovider duet/tests -q
 
+# 의존성 고정 파일 갱신 (requirements.txt 를 바꾼 뒤)
+cd duet && uv pip compile requirements.txt --universal --python-version 3.10 --no-header -o requirements.lock
+
 # CLI 없이 전체 흐름 시험 (웹 UI)
 python3 duet --web --fake
 ```
+
+GitHub Actions(`.github/workflows/ci.yml`)가 push와 PR마다 Ubuntu·macOS, Python 3.10·3.12에서 테스트를 돌리고, 설치 스크립트와 첫 실행(가상환경 생성, lock 설치)을 검증합니다.
 
 `--fake`는 가짜 에이전트로 위임, 합의, 승인, 병렬 작업, 병합 흐름을 그대로 재현합니다. 테스트는 실제 git 저장소를 임시로 만들어 워크트리·병합·push 차단까지 검증합니다.

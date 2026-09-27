@@ -4,6 +4,7 @@
 
     python3 duet            # 또는
     python3 -m duet
+    python3 duet --doctor   # 환경 점검 (--fix: 고칠 수 있는 것 고치기)
 
 처음 실행하면 .duet/venv 가상환경을 만들고 의존성을 설치한 뒤, 그 환경으로 다시 실행됩니다.
 이 파일과 bootstrap.py 는 표준 라이브러리만 사용합니다(시스템 파이썬 3.8+에서도 동작).
@@ -29,6 +30,10 @@ def _prepare_import_path():
 def main():
     _prepare_import_path()
     import importlib
+
+    if "--doctor" in sys.argv[1:]:  # 가상환경을 만들기 전에 표준 라이브러리만으로 환경 점검
+        doctor = importlib.import_module(DUET_DIR.name + ".doctor")
+        sys.exit(doctor.main(DUET_DIR, PROJECT_DIR, sys.argv[1:]))
 
     bootstrap = importlib.import_module(DUET_DIR.name + ".bootstrap")
     bootstrap.ensure_environment(DUET_DIR, PROJECT_DIR, sys.argv[1:])
