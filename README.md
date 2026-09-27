@@ -11,6 +11,7 @@
 
 ## 목차
 
+- [빠른 시작](#빠른-시작)
 - [주요 기능](#주요-기능)
 - [동작 방식](#동작-방식)
 - [요구 사항](#요구-사항)
@@ -29,6 +30,41 @@
 - [CLI별 참고 사항](#cli별-참고-사항)
 - [문제 해결](#문제-해결)
 - [개발](#개발)
+
+## 빠른 시작
+
+작업할 프로젝트 폴더 안에 `duet/`을 두고, 환경 설치 스크립트로 점검·설치한 뒤 실행합니다. 두 스크립트는 같은 여섯 단계(Python, Git, Node.js, CLI, 가상환경, 요약)를 거칩니다.
+
+**macOS · Linux**
+
+```bash
+cd ~/my-project
+curl -fsSL https://raw.githubusercontent.com/Choo-Wooo/Duet-AI-Operation/main/install.sh | bash
+# 또는 직접: git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet && bash duet/setup.sh
+
+python3 duet --web    # 브라우저 웹 UI (권장)
+python3 duet          # 터미널 분할 화면(TUI)
+```
+
+**Windows (PowerShell 또는 명령 프롬프트)**
+
+```bat
+cd D:\my-project
+git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet
+duet\setup-windows.bat
+
+python duet --web     :: 또는 py duet --web
+```
+
+| 하는 일 | macOS · Linux | Windows |
+| --- | --- | --- |
+| 점검하고, 빠진 것은 하나씩 물어본 뒤 설치 | `bash duet/setup.sh` | `duet\setup-windows.bat` |
+| 점검만 (설치하지 않음) | `bash duet/setup.sh --check` | `duet\setup-windows.bat /check` |
+| 묻지 않고 빠진 것 모두 설치 | `bash duet/setup.sh --yes` | `duet\setup-windows.bat /yes` |
+| 자세한 진단 | `python3 duet --doctor` | |
+| 실행 | `python3 duet --web` | `python duet --web` |
+
+CLI는 설치 후 한 번씩 로그인해 두어야 합니다: `claude` 실행 후 `/login`, `codex login`, `agy` 실행 후 브라우저 로그인. 단계별 설치 방법은 [설치와 실행](#설치와-실행)에 있습니다.
 
 ## 주요 기능
 
@@ -77,49 +113,13 @@ curl -fsSL https://chatgpt.com/codex/install.sh | sh         # Codex CLI, 설치
 curl -fsSL https://antigravity.google/cli/install.sh | bash  # Antigravity CLI, 설치 후 agy 로 로그인
 ```
 
-설치 여부, PATH, 로그인 상태는 `python3 duet --doctor`가 한 번에 점검합니다.
+Windows는 `irm https://claude.ai/install.ps1 | iex`(Claude Code), `npm i -g @openai/codex`(Codex)로 설치합니다. 설치 여부, PATH, 로그인 상태는 환경 설치 스크립트(`setup.sh`, `setup-windows.bat`)가 한 번에 점검합니다.
 
 ## 설치와 실행
 
-### 설치 스크립트 (macOS, Linux)
+### macOS·Linux: setup.sh
 
-작업할 프로젝트 폴더에서 실행합니다. `./duet`에 내려받고 `duet/setup.sh`로 환경을 점검·설치합니다.
-
-```bash
-cd ~/my-project
-curl -fsSL https://raw.githubusercontent.com/Choo-Wooo/Duet-AI-Operation/main/install.sh | bash
-```
-
-이미 `./duet`이 git 클론이면 최신으로 갱신합니다. 환경 변수로 동작을 바꿀 수 있습니다.
-
-| 변수 | 설명 |
-| --- | --- |
-| `DUET_REF` | 브랜치 또는 태그 (기본 `main`) |
-| `DUET_DIR` | 설치 위치 (기본 `./duet`) |
-| `DUET_NO_UV=1` | uv를 설치하지 않고 시스템 파이썬만 사용 |
-| `DUET_FIX=1` | 빠진 것을 묻지 않고 모두 설치 (`setup.sh --yes`) |
-| `DUET_CHECK=1` | 점검만 하고 설치하지 않음 (`setup.sh --check`) |
-
-### 직접 설치
-
-```bash
-cd ~/my-project
-git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet
-
-bash duet/setup.sh    # 환경 점검·설치
-python3 duet --web    # 브라우저 웹 UI (권장)
-python3 duet          # 터미널 분할 화면(TUI)
-```
-
-### 환경 설치 (setup.sh)
-
-Windows의 `setup-windows.bat`과 같은 역할을 하는 macOS·Linux 스크립트입니다. 여섯 단계로 점검하고, 빠진 것은 하나씩 물어본 뒤 설치합니다.
-
-```bash
-bash duet/setup.sh           # 점검하고, 빠진 것은 하나씩 물어본 뒤 설치
-bash duet/setup.sh --check   # 점검만
-bash duet/setup.sh --yes     # 묻지 않고 빠진 것 모두 설치
-```
+프로젝트 폴더에서 `bash duet/setup.sh`로 실행합니다. 여섯 단계로 점검하고, 빠진 것은 하나씩 물어본 뒤 설치합니다. `curl ... | bash`로 실행될 때도 질문은 터미널에서 받습니다.
 
 | 단계 | 점검 | 설치 방법 |
 | --- | --- | --- |
@@ -132,7 +132,43 @@ bash duet/setup.sh --yes     # 묻지 않고 빠진 것 모두 설치
 
 `~/.local/bin` 같은 사용자 폴더에 설치돼 있지만 PATH에 없는 CLI는 셸 설정 파일(`~/.zshrc`, `~/.bashrc` 등)에 PATH 한 줄을 추가하겠냐고 묻습니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
 
-### 자세한 진단 (--doctor)
+### Windows: setup-windows.bat
+
+프로젝트 폴더의 `duet\setup-windows.bat`을 실행합니다. 탐색기에서 더블클릭해도 되며, 이때는 끝난 뒤 창이 바로 닫히지 않고 멈춥니다.
+
+| 단계 | 점검 | 설치 방법 |
+| --- | --- | --- |
+| 1. Python | Python 3.10+ (`py` 런처, `python`) | `winget install Python.Python.3.12` |
+| 2. Git | 설치 여부, 2.45 이상인지, Git Bash 위치 | `winget install Git.Git` (오래된 버전은 `winget upgrade`) |
+| 3. Node.js | `node` (npm으로 CLI 설치, 디자이너 브라우저 도구 `npx`) | `winget install OpenJS.NodeJS.LTS` |
+| 4. CLI | claude, codex, agy 설치·로그인 | claude: 공식 `install.ps1`, codex: `npm i -g @openai/codex`, agy: 직접 설치 |
+| 5. 가상환경 | `.duet\venv`와 의존성 | duet 부트스트랩으로 생성 |
+| 6. 요약 | 문제·주의 개수, 실행 명령 | |
+
+설치 직후에는 레지스트리의 PATH를 다시 읽어 새 창을 열지 않아도 이어서 점검합니다. winget이 없으면 자동 설치 대신 내려받을 주소를 알려 줍니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
+
+Windows에서 macOS·Linux와 다르게 동작하는 부분은 다음과 같습니다.
+
+- CLI 는 `claude.exe`(네이티브 설치 `~\.local\bin`), npm 전역 설치(`%APPDATA%\npm`), Codex·agy 설치 폴더에서도 찾습니다.
+- 에이전트가 합의한 테스트 명령은 Git Bash 로 실행합니다(에이전트가 bash 문법으로 쓰기 때문). Git Bash 가 없으면 `cmd` 로 실행합니다.
+- Codex·agy 는 Windows 에서 PowerShell 로 명령을 실행합니다. `Get-Content`, `Get-ChildItem`, `Select-String` 같은 읽기 전용 명령은 자동 허용하고, `Remove-Item -Recurse`, `Invoke-WebRequest`, `Stop-Process` 등은 사람 확인 대상입니다. 이 규칙은 새로 만드는 `.duet/policy.yaml` 에 들어가므로, 기존 프로젝트는 `policy.yaml` 을 지우고 다시 실행하면 반영됩니다.
+- 병렬 작업 워크트리의 `node_modules`·`.venv` 링크는 관리자 권한이 필요 없는 정션(junction)으로 만듭니다.
+- agy 권한 훅은 유닉스 소켓 대신 127.0.0.1 의 임시 포트(토큰 확인)로 duet 과 통신합니다.
+- `/ask` 질문 콘솔은 새 콘솔 창으로 열립니다. 승인 요청 알림은 브라우저 탭이 없을 때 Windows 알림으로 뜹니다.
+
+### 설치 스크립트 install.sh (macOS·Linux)
+
+`./duet`에 저장소를 내려받고(이미 git 클론이면 최신으로 갱신) `duet/setup.sh`를 실행합니다. 환경 변수로 동작을 바꿀 수 있습니다.
+
+| 변수 | 설명 |
+| --- | --- |
+| `DUET_REF` | 브랜치 또는 태그 (기본 `main`) |
+| `DUET_DIR` | 설치 위치 (기본 `./duet`) |
+| `DUET_NO_UV=1` | uv를 설치하지 않고 시스템 파이썬만 사용 |
+| `DUET_FIX=1` | 빠진 것을 묻지 않고 모두 설치 (`setup.sh --yes`) |
+| `DUET_CHECK=1` | 점검만 하고 설치하지 않음 (`setup.sh --check`) |
+
+### 자세한 진단: --doctor (macOS·Linux)
 
 `python3 duet --doctor`는 가상환경을 만들기 전에 표준 라이브러리만으로 실행되며 다음을 확인합니다.
 
@@ -145,6 +181,8 @@ bash duet/setup.sh --yes     # 묻지 않고 빠진 것 모두 설치
 
 `--fix`를 붙이면 PATH 등록(셸 설정 파일에 한 줄 추가)과 빠진 CLI·uv 설치를 항목마다 물어보고 실행합니다. `--yes`는 묻지 않고 진행하고, `--no-login`은 로그인 확인을 건너뜁니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
 
+### 처음 실행할 때
+
 처음 실행하면 다음을 자동으로 준비합니다.
 
 1. `.duet/venv` 가상환경과 의존성(claude-agent-sdk, textual, pyyaml, aiohttp). 검증된 버전을 고정한 `requirements.lock`으로 설치하고, 그 플랫폼에서 실패하면 `requirements.txt`의 범위 지정으로 다시 시도합니다. uv가 있으면 uv로 만들고 설치합니다(`DUET_USE_PIP=1`이면 pip). 두 파일 중 하나가 바뀌면 다시 설치합니다.
@@ -152,27 +190,6 @@ bash duet/setup.sh --yes     # 묻지 않고 빠진 것 모두 설치
 3. 각 CLI의 로그인 계정을 확인해 구독인지 API 키 과금인지 알려 줍니다.
 4. `.duet/modes.yaml`, `.duet/policy.yaml`, `DIALOGUE.md`를 만듭니다.
 5. git 저장소가 아니면 `git init`을 하고, `.gitignore`에 duet 폴더와 런타임 파일을 추가합니다.
-
-### Windows
-
-처음에는 `duet\setup-windows.bat` 을 실행해 환경을 점검·설치합니다 (탐색기에서 더블클릭해도 됩니다).
-
-```bat
-duet\setup-windows.bat          :: 점검하고, 빠진 것은 하나씩 물어본 뒤 설치 (winget·npm·공식 설치 스크립트)
-duet\setup-windows.bat /check   :: 점검만
-duet\setup-windows.bat /yes     :: 묻지 않고 빠진 것 모두 설치
-```
-
-Python 3.10+, Git(2.45+ 권장)·Git Bash, Node.js, claude/codex/agy 설치와 로그인 여부, `.duet\venv` 가상환경을 확인합니다. agy 는 자동 설치하지 않으므로 https://antigravity.google 안내에 따라 설치하세요.
-
-그다음 PowerShell 에서 `python duet --web` (또는 `py duet --web`)으로 실행합니다. macOS 와 다른 점은 다음과 같습니다.
-
-- CLI 는 `claude.exe`(네이티브 설치 `~\.local\bin`), npm 전역 설치(`%APPDATA%\npm`), Codex·agy 설치 폴더에서도 찾습니다.
-- 에이전트가 합의한 테스트 명령은 Git Bash 로 실행합니다(에이전트가 bash 문법으로 쓰기 때문). Git Bash 가 없으면 `cmd` 로 실행합니다.
-- Codex·agy 는 Windows 에서 PowerShell 로 명령을 실행합니다. `Get-Content`, `Get-ChildItem`, `Select-String` 같은 읽기 전용 명령은 자동 허용하고, `Remove-Item -Recurse`, `Invoke-WebRequest`, `Stop-Process` 등은 사람 확인 대상입니다. 이 규칙은 새로 만드는 `.duet/policy.yaml` 에 들어가므로, 기존 프로젝트는 `policy.yaml` 을 지우고 다시 실행하면 반영됩니다.
-- 병렬 작업 워크트리의 `node_modules`·`.venv` 링크는 관리자 권한이 필요 없는 정션(junction)으로 만듭니다.
-- agy 권한 훅은 유닉스 소켓 대신 127.0.0.1 의 임시 포트(토큰 확인)로 duet 과 통신합니다.
-- `/ask` 질문 콘솔은 새 콘솔 창으로 열립니다. 승인 요청 알림은 브라우저 탭이 없을 때 Windows 알림으로 뜹니다.
 
 `--web`은 이 컴퓨터(127.0.0.1)에서만 열리는 서버를 띄우고, 실행마다 새로 만든 토큰이 붙은 주소를 브라우저로 엽니다. 토큰 없는 요청은 거부합니다. 종료는 터미널에서 `Ctrl+C`입니다.
 
@@ -232,7 +249,7 @@ Python 3.10+, Git(2.45+ 권장)·Git Bash, Node.js, claude/codex/agy 설치와 �
 
 #### 설정
 
-병렬 동시 실행 수, 자동 병합, 통합 테스트 명령, 계획 합의 라운드, 컨텍스트 한도 등 진행 설정을 바꿉니다. 변경 내용은 `.duet/roles.yaml`에 저장됩니다.
+맨 위의 **전권 자동 수락** 스위치로 승인·선택을 묻지 않고 진행하게 할 수 있습니다([전권 자동 모드](#전권-자동-모드)). 그 아래에서 병렬 동시 실행 수, 자동 병합, 통합 테스트 명령, 계획 합의 라운드, 컨텍스트 한도 등 진행 설정을 바꿉니다. 변경 내용은 `.duet/roles.yaml`에 저장됩니다.
 
 ![설정](docs/images/web-settings.png)
 
@@ -381,6 +398,10 @@ flowchart LR
 - 턴 한도, 합의 라운드, 병합 확인 같은 선택은 진행 쪽으로 자동으로 고릅니다. 같은 질문이 다섯 번 넘게 반복되면 멈추고, 사람이 정한 예산 한도는 지킵니다.
 - 작업자의 질문(`ASK_HUMAN`, `REPORT blocked`)은 설계자가 사람 대신 판단합니다. 설계자 자신의 질문만 사람에게 옵니다.
 - 켜져 있는 동안 웹 UI 상단에 "전권 자동" 표시가 나타나며, 누르면 설정 화면으로 이동해 끌 수 있습니다.
+
+![전권 자동 수락을 켠 설정 화면](docs/images/web-autopilot.png)
+
+스위치를 켜면 확인 창이 한 번 뜨고, 켜진 동안 카드 테두리와 상단 표시가 붉게 바뀝니다. 끄면 바로 원래의 승인 흐름으로 돌아갑니다.
 
 ## 대화 모드
 
