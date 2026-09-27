@@ -36,6 +36,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     session.add_argument("--load", metavar="이름", help="저장된 대화 세션을 불러온 뒤 시작")
     p.add_argument("--list-saves", action="store_true", help="저장된 세션 목록 출력 후 종료")
     p.add_argument("-m", "--message", help="시작하자마자 설계자에게 보낼 메시지")
+    bench = p.add_argument_group("무인 벤치마크 (--bench)")
+    bench.add_argument("--bench", action="store_true",
+                       help="과제 하나를 사람 없이 끝까지 진행하고 결과 커밋·지표를 남긴 뒤 종료 (-m 또는 --bench-task)")
+    bench.add_argument("--bench-task", metavar="파일", help="과제 설명 파일 (instruction.md 등)")
+    bench.add_argument("--bench-out", metavar="파일", help="지표 JSON 저장 위치 (기본 .duet/bench-result.json)")
+    bench.add_argument("--bench-parallel", type=int, metavar="N", help="병렬 작업 동시 실행 수 (1 이면 병렬 없음)")
+    bench.add_argument("--bench-timeout", type=float, default=10200.0, metavar="초", help="전체 시간 제한 (기본 10200초)")
+    bench.add_argument("--bench-nudges", type=int, default=3, metavar="N",
+                       help="사람 차례로 멈췄을 때 스스로 마무리하라고 안내할 횟수 (기본 3)")
+    bench.add_argument("--role-model", action="append", default=[], metavar="역할=cli/모델",
+                       help="역할의 CLI·모델 지정 (여러 번 가능). 예: architect=claude/claude-opus-5-5")
     p.add_argument("--ask", nargs="?", const="", metavar="역할",
                    help="질문 콘솔만 실행 (기본: 메인 역할). 보통은 duet 안에서 /ask 로 새 창을 엽니다")
     return p.parse_args(argv)
@@ -94,6 +105,35 @@ def setup_project(duet_dir: Path, project: Path, fake: bool) -> tuple[Config, li
     return cfg, msgs
 
 
+def _run_bench(args: argparse.Namespace, cfg: Config, msgs: list[str], duet_dir: Path) -> int:
+    from .bench import run_bench
+    task = args.message or ""
+    if args.bench_task:
+        task = Path(args.bench_task).read_text(encoding="utf-8")
+    if not task.strip():
+        print("[duet] --bench 에는 과제가 필요합니다: -m \"과제\" 또는 --bench-task 파일")
+        return 2
+    if args.budget_usd is not None:
+        cfg.runtime["budget_usd"] = args.budget_usd
+    out = Path(args.bench_out) if args.bench_out else cfg.dir / "bench-result.json"
+    bus = EventBus(cfg.logs_dir)
+    bus.subscribe(lambda ev: (lambda s: s and print(s, flush=True))(_bench_line(ev)))
+    try:
+        result = asyncio.run(run_bench(cfg, bus, msgs, args.fake, task, out=out, parallel=args.bench_parallel,
+                                       timeout=args.bench_timeout, nudges=args.bench_nudges,
+                                       duet_dirname=duet_dir.name))
+    finally:
+        bus.close()
+    return 0 if result["finished"] in ("done", "stalled", "timeout") else 1
+
+
+def _bench_line(ev) -> str | None:
+    from .console import fmt_event
+    if ev.kind in ("text", "tool_output"):
+        return None  # 로그는 .duet/logs 에 남는다. 화면에는 흐름만
+    return fmt_event(ev)
+
+
 def main(duet_dir: Path, project: Path, argv: list[str]) -> int:
     # Claude Code 안에서 실행된 경우 그 세션 정보가 하위 claude 로 새지 않게 한다
     for key in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION"):
@@ -118,6 +158,15 @@ def main(duet_dir: Path, project: Path, argv: list[str]) -> int:
         except KeyboardInterrupt:
             return 0
     cfg, msgs = setup_project(duet_dir, project, args.fake)
+    if args.role_model:
+        from .bench import apply_role_models
+        try:
+            msgs.extend("역할 지정: " + x for x in apply_role_models(cfg, args.role_model))
+        except ValueError as e:
+            print(f"[duet] {e}")
+            return 2
+    if args.bench:
+        return _run_bench(args, cfg, msgs, duet_dir)
     if args.load:
         from .console import ConsoleUI
         from .core.orchestrator import Orchestrator
