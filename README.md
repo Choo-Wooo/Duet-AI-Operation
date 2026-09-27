@@ -83,7 +83,7 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash  # Antigravity CLI, 
 
 ### 설치 스크립트 (macOS, Linux)
 
-작업할 프로젝트 폴더에서 실행합니다. `./duet`에 내려받고, 필요하면 `uv`를 설치한 뒤 환경을 점검합니다.
+작업할 프로젝트 폴더에서 실행합니다. `./duet`에 내려받고 `duet/setup.sh`로 환경을 점검·설치합니다.
 
 ```bash
 cd ~/my-project
@@ -97,7 +97,8 @@ curl -fsSL https://raw.githubusercontent.com/Choo-Wooo/Duet-AI-Operation/main/in
 | `DUET_REF` | 브랜치 또는 태그 (기본 `main`) |
 | `DUET_DIR` | 설치 위치 (기본 `./duet`) |
 | `DUET_NO_UV=1` | uv를 설치하지 않고 시스템 파이썬만 사용 |
-| `DUET_FIX=1` | 점검 뒤 고칠 수 있는 항목을 묻지 않고 고침 |
+| `DUET_FIX=1` | 빠진 것을 묻지 않고 모두 설치 (`setup.sh --yes`) |
+| `DUET_CHECK=1` | 점검만 하고 설치하지 않음 (`setup.sh --check`) |
 
 ### 직접 설치
 
@@ -105,12 +106,33 @@ curl -fsSL https://raw.githubusercontent.com/Choo-Wooo/Duet-AI-Operation/main/in
 cd ~/my-project
 git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet
 
-python3 duet --doctor # 환경 점검
+bash duet/setup.sh    # 환경 점검·설치
 python3 duet --web    # 브라우저 웹 UI (권장)
 python3 duet          # 터미널 분할 화면(TUI)
 ```
 
-### 환경 점검
+### 환경 설치 (setup.sh)
+
+Windows의 `setup-windows.bat`과 같은 역할을 하는 macOS·Linux 스크립트입니다. 여섯 단계로 점검하고, 빠진 것은 하나씩 물어본 뒤 설치합니다.
+
+```bash
+bash duet/setup.sh           # 점검하고, 빠진 것은 하나씩 물어본 뒤 설치
+bash duet/setup.sh --check   # 점검만
+bash duet/setup.sh --yes     # 묻지 않고 빠진 것 모두 설치
+```
+
+| 단계 | 점검 | 설치 방법 |
+| --- | --- | --- |
+| 1. Python · uv | Python 3.10+, uv | uv 공식 설치 스크립트, `uv python install 3.12` |
+| 2. Git | 설치 여부, 2.45 이상인지, 전역 user.email | macOS: Homebrew 또는 `xcode-select --install`, Linux: 배포판 패키지(sudo) |
+| 3. Node.js | `node` (디자이너 브라우저 도구 `npx`) | macOS: Homebrew, Linux: 배포판 패키지(sudo) |
+| 4. CLI | claude, codex, agy 설치·PATH·로그인 | 각 CLI 공식 설치 스크립트 (codex는 실패 시 npm) |
+| 5. 가상환경 | `.duet/venv`와 의존성 | duet 부트스트랩으로 생성 (`requirements.lock`) |
+| 6. 요약 | 문제·주의 개수, 실행 명령 | |
+
+`~/.local/bin` 같은 사용자 폴더에 설치돼 있지만 PATH에 없는 CLI는 셸 설정 파일(`~/.zshrc`, `~/.bashrc` 등)에 PATH 한 줄을 추가하겠냐고 묻습니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
+
+### 자세한 진단 (--doctor)
 
 `python3 duet --doctor`는 가상환경을 만들기 전에 표준 라이브러리만으로 실행되며 다음을 확인합니다.
 
@@ -497,7 +519,7 @@ docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록
 
 | 증상 | 확인할 것 |
 | --- | --- |
-| 설치·실행이 안 됨 | `python3 duet --doctor`로 원인을 확인하고 `--fix`로 고칠 수 있는 것은 고치세요. |
+| 설치·실행이 안 됨 | `bash duet/setup.sh`(Windows는 `duet\setup-windows.bat`)로 점검·설치하고, 자세한 원인은 `python3 duet --doctor`로 확인하세요. |
 | 의존성 설치 실패 | 네트워크·프록시를 확인하고 `.duet/venv`를 지운 뒤 다시 실행하세요. Debian·Ubuntu에서 venv 모듈이 없으면 `sudo apt install python3-venv` 또는 uv를 설치하세요. |
 | `unrecognized arguments: --web` | 프로젝트 안의 `duet/` 폴더가 이전 버전입니다. 최신 코드로 교체하세요. |
 | Claude가 API 오류(버전 미지원)를 냄 | 오래된 `claude`가 PATH에 먼저 잡혀 있을 수 있습니다. duet은 가장 최신 설치본을 고르지만, 시작 안내에 표시된 경로와 버전을 확인하세요. |

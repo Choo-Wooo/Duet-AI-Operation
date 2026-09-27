@@ -186,18 +186,19 @@ def local_repo(tmp_path):
 
 
 def _run_install(cwd, repo, **env):
-    e = dict(os.environ, DUET_REPO=str(repo), DUET_NO_UV="1", **env)
+    e = dict(os.environ, DUET_REPO=str(repo), DUET_NO_UV="1", DUET_CHECK="1", **env)
     return subprocess.run(["bash", str(DUET_DIR / "install.sh")], cwd=cwd, capture_output=True,
-                          text=True, timeout=180, env=e)
+                          text=True, timeout=240, env=e, stdin=subprocess.DEVNULL)
 
 
-def test_install_sh_clones_and_runs_doctor(tmp_path, local_repo):
+def test_install_sh_clones_and_runs_setup(tmp_path, local_repo):
     proj = tmp_path / "proj"
     proj.mkdir()
     p = _run_install(proj, local_repo)
     assert p.returncode == 0, p.stdout + p.stderr
     assert (proj / "duet" / "__main__.py").exists()
-    assert "duet 환경 점검" in p.stdout and "python3 duet --web" in p.stdout
+    assert "duet 환경 점검" in p.stdout and "[6/6] 요약" in p.stdout and "python3 duet --web" in p.stdout
+    assert (proj / "duet" / "setup.sh").exists()
     # 두 번째 실행은 갱신만
     p = _run_install(proj, local_repo)
     assert p.returncode == 0 and "최신으로 갱신" in p.stdout
@@ -208,3 +209,74 @@ def test_install_sh_refuses_non_git_folder(tmp_path, local_repo):
     (proj / "duet").mkdir(parents=True)
     p = _run_install(proj, local_repo)
     assert p.returncode != 0 and "git 저장소가 아닙니다" in p.stderr
+
+
+# ------------------------------------------------------------------ setup.sh (setup-windows.bat 과 같은 역할)
+FAKE_CLIS = {
+    "claude": """case "$1" in --version) echo "9.9.9 (Claude Code)";; auth) echo '{"loggedIn": true}';; esac\n""",
+    "codex": """case "$1" in --version) echo "codex-cli 1.0";; login) echo "Not logged in"; exit 1;; esac\n""",
+    "agy": """case "$1" in --version) echo "1.2.3";; models) echo m1;; esac\n""",
+}
+
+
+@pytest.fixture
+def setup_env(tmp_path):
+    """setup.sh 를 격리해 돌릴 환경: 필요한 도구만 있는 PATH, 가짜 HOME, 준비된 가상환경."""
+    import shutil
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("python3", "git", "bash", "sh", "env", "awk", "cut", "grep", "sed", "head", "basename",
+                 "dirname", "id", "uname", "cat", "timeout"):
+        found = shutil.which(tool)
+        if found:
+            (bindir / tool).symlink_to(os.path.realpath(found))
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "duet").symlink_to(DUET_DIR)
+    venv = proj / ".duet" / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    (venv / "pyvenv.cfg").write_text("home = x\n")
+    (venv / ".duet-requirements").write_text("x\n")
+    env = {"PATH": str(bindir), "HOME": str(home), "SHELL": "/bin/zsh", "LANG": "C.UTF-8"}
+
+    def run(*args, clis=("claude", "codex", "agy"), where="local"):
+        target = home / ".local" / "bin" if where == "local" else bindir
+        for name in clis:
+            _fake_exe(target, name, FAKE_CLIS[name])
+        return subprocess.run(["bash", str(proj / "duet" / "setup.sh"), *args], cwd=proj, env=env,
+                              capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    return run, home
+
+
+def test_setup_sh_check_reports_without_changing(setup_env):
+    run, home = setup_env
+    p = run("--check")
+    assert p.returncode == 0, p.stdout + p.stderr
+    out = p.stdout
+    for step in ("[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]"):
+        assert step in out
+    assert out.count("PATH 에 없습니다") >= 3        # 세 CLI 가 ~/.local/bin 에만 있음
+    assert "codex-cli 1.0 - 로그인 안 됨" in out
+    assert "claude 9.9.9 (Claude Code) - 로그인됨" in out and "agy 1.2.3 - 로그인됨" in out
+    assert "[5/6]" in out and "준비됨" in out
+    assert not (home / ".zshrc").exists()
+
+
+def test_setup_sh_yes_adds_path_once(setup_env):
+    run, home = setup_env
+    for _ in range(2):
+        p = run("--yes")
+        assert p.returncode == 0, p.stdout + p.stderr
+    rc = (home / ".zshrc").read_text()
+    assert rc.count("# duet setup") == 1 and '$HOME/.local/bin' in rc
+
+
+def test_setup_sh_on_path_and_no_cli_fails(setup_env):
+    run, home = setup_env
+    p = run("--check", clis=())
+    assert p.returncode == 1 and "설치된 CLI 가 없습니다" in p.stdout
+    p = run("--check", clis=("claude",), where="path")
+    assert p.returncode == 0 and "PATH 에 없습니다" not in p.stdout.split("[4/6]")[1]

@@ -3,13 +3,14 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Choo-Wooo/Duet-AI-Operation/main/install.sh | bash
 #
-# 현재 폴더(작업할 프로젝트 폴더)에 ./duet 을 내려받고 환경을 점검한다.
+# 현재 폴더(작업할 프로젝트 폴더)에 ./duet 을 내려받고 duet/setup.sh 로 환경을 점검·설치한다.
 # 환경 변수:
 #   DUET_DIR     설치 위치 (기본: ./duet)
 #   DUET_REF     브랜치·태그 (기본: main)
 #   DUET_REPO    저장소 주소
 #   DUET_NO_UV=1 uv 를 설치하지 않는다
-#   DUET_FIX=1   점검 후 고칠 수 있는 항목을 묻지 않고 고친다 (--doctor --fix --yes)
+#   DUET_FIX=1   빠진 것을 묻지 않고 모두 설치 (setup.sh --yes)
+#   DUET_CHECK=1 점검만 하고 설치하지 않음 (setup.sh --check)
 set -euo pipefail
 
 REPO="${DUET_REPO:-https://github.com/Choo-Wooo/Duet-AI-Operation.git}"
@@ -57,29 +58,17 @@ else
   git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DEST"
 fi
 
-PY=""
-for c in python3.13 python3.12 python3.11 python3.10 python3; do
-  if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
-done
+SETUP_ARGS=()
+[ "${DUET_FIX:-0}" = "1" ] && SETUP_ARGS+=(--yes)
+[ "${DUET_CHECK:-0}" = "1" ] && SETUP_ARGS+=(--check)
 
-DOCTOR_ARGS=(--doctor)
-[ "${DUET_FIX:-0}" = "1" ] && DOCTOR_ARGS+=(--fix --yes)
-
-say "환경을 점검합니다."
-echo
+say "환경을 점검하고 빠진 것을 설치합니다 (duet/setup.sh)."
 set +e
-if [ -n "$PY" ]; then
-  "$PY" "$DEST" "${DOCTOR_ARGS[@]}"
-elif command -v uv >/dev/null 2>&1; then
-  uv run --no-project --python 3.12 python "$DEST" "${DOCTOR_ARGS[@]}"
-else
-  say "파이썬이 없습니다. uv 를 설치하거나 python3 (3.10+) 를 설치하세요."
-fi
+bash "$DEST/setup.sh" ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
 set -e
 
 echo
-say "설치가 끝났습니다. 다음 순서로 시작하세요."
-say "  1) 위 점검에 [필수] 항목이 있으면 안내된 명령을 실행하거나: python3 $DEST --doctor --fix"
-say "  2) 웹 UI:   python3 $DEST --web"
-say "     터미널:  python3 $DEST"
-say "  처음 실행할 때 .duet/venv 에 의존성을 설치합니다 (1~2분)."
+say "설치가 끝났습니다."
+say "  다시 점검·설치:  bash $DEST/setup.sh   (점검만: --check, 모두 자동: --yes)"
+say "  자세한 진단:     python3 $DEST --doctor"
+say "  실행:            python3 $DEST --web   (터미널 UI: python3 $DEST)"

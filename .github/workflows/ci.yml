@@ -49,8 +49,9 @@ jobs:
         run: |
           git -C src checkout -q -B ci-install
           mkdir project && cd project
-          DUET_REPO="$GITHUB_WORKSPACE/src" DUET_REF=ci-install bash ../src/install.sh
+          DUET_REPO="$GITHUB_WORKSPACE/src" DUET_REF=ci-install DUET_CHECK=1 bash ../src/install.sh
           test -f duet/__main__.py
+          grep -q "\[6/6\]" <(bash duet/setup.sh --check || true)
       - name: 첫 실행 (가상환경 생성 + requirements.lock 설치 + 재실행)
         run: |
           cd project
