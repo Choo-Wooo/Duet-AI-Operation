@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from pathlib import Path
 
 from .clis import which
+from .procs import close_transport, group_kwargs, reap
 
 
 def parse_agy_models(text: str) -> list[dict]:
@@ -36,12 +36,13 @@ async def agy_models(timeout: float = 30) -> list[dict]:
         raise RuntimeError("agy CLI 없음")
     proc = await asyncio.create_subprocess_exec(exe, "models", stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL,
-                                                start_new_session=True)
+                                                **group_kwargs())
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
+    except BaseException:  # 시간 초과·취소: 프로세스를 남기지 않는다
+        await reap(proc)
         raise
+    close_transport(proc)
     models = parse_agy_models(out.decode(errors="replace"))
     if proc.returncode or not models:
         msg = (err.decode(errors="replace") or out.decode(errors="replace")).strip().splitlines()
@@ -81,7 +82,7 @@ async def codex_models() -> list[dict]:
         raise RuntimeError("codex CLI 없음")
     proc = await asyncio.create_subprocess_exec(
         exe, "app-server", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024, start_new_session=True)
+        stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024, **group_kwargs())
 
     async def call(rid: int, method: str, params: dict) -> dict:
         proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}) + "\n").encode())
@@ -106,11 +107,7 @@ async def codex_models() -> list[dict]:
         await proc.stdin.drain()
         res = await call(2, "model/list", {})
     finally:
-        try:
-            os.killpg(proc.pid, 9)
-        except (ProcessLookupError, PermissionError):
-            pass
-        await proc.wait()
+        await reap(proc)
     out = []
     for m in res.get("data") or res.get("models") or []:
         mid = m.get("model") or m.get("id")

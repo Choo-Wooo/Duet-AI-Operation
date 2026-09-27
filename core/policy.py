@@ -29,6 +29,7 @@ AUTOPILOT_DENY = [
     r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+(/|~|\$HOME)(\s|$)",
     r"\bmkfs\b|\bdd\s+if=",
     r"\b(npm|pnpm|yarn|cargo|twine|poetry)\s+publish\b",
+    r"(?i)-Verb\s+RunAs\b|\bformat(\.com)?\s+[a-z]:",  # Windows 관리자 권한 실행·디스크 포맷
 ]
 # 읽기 전용 명령 (모든 역할·모든 단계에서 파일로 리다이렉트하지 않으면 자동 허용)
 READ_COMMAND = re.compile(
@@ -223,8 +224,102 @@ def _read_part(part: str) -> bool:
     return part.startswith("cd ") or (is_read_command(part) and not write_options(part))
 
 
+# Windows 의 Codex·agy 는 명령을 PowerShell 로 실행한다. 읽기만 하는 cmdlet (별칭 포함)
+PS_READ_CMDLETS = {
+    "get-content", "gc", "type", "cat", "get-childitem", "gci", "ls", "dir", "select-string", "sls",
+    "get-location", "gl", "pwd", "test-path", "get-item", "gi", "get-itemproperty", "gp", "resolve-path",
+    "rvpa", "split-path", "join-path", "get-filehash", "get-date", "measure-object", "measure",
+    "select-object", "select", "sort-object", "sort", "format-table", "ft", "format-list", "fl", "out-string",
+    "write-output", "echo", "write-host", "get-command", "gcm", "rg", "findstr", "tree",
+}
+PS_EXES = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+PS_FLAGS = {"-noprofile", "-nop", "-nologo", "-noninteractive", "-noni"}
+
+
+def _powershell_script(cmd: str) -> str | None:
+    """`powershell.exe -NoProfile -Command '<스크립트>'` 형태면 스크립트를, 아니면 None."""
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        return None
+    if not words or re.split(r"[\\/]", words[0])[-1].lower() not in PS_EXES:
+        return None
+    i = 1
+    while i < len(words) and words[i].lower() in PS_FLAGS:
+        i += 1
+    if i + 2 == len(words) and words[i].lower() in ("-command", "-c"):
+        return words[i + 1]
+    return None
+
+
+def _powershell_segments(script: str) -> list[str] | None:
+    """PowerShell 파이프라인을 ; | 로 나눈다. 변수·하위식·스크립트 블록·리다이렉트 등 해석이 필요한 구문이면 None."""
+    parts, buf, quote, i = [], [], None, 0
+    while i < len(script):
+        c = script[i]
+        if quote == "'":
+            buf.append(c)
+            if c == "'":
+                if script.startswith("''", i):
+                    buf.append("'")
+                    i += 1
+                else:
+                    quote = None
+        elif quote == '"':
+            if c in "`$":
+                return None  # 이스케이프·변수 확장
+            buf.append(c)
+            if c == '"':
+                quote = None
+        elif c in "'\"":
+            quote = c
+            buf.append(c)
+        elif c in ";|\n":
+            if not "".join(buf).strip():
+                return None
+            parts.append("".join(buf).strip())
+            buf = []
+        elif c in "`$@&<>(){}[]#,":
+            return None
+        else:
+            buf.append(c)
+        i += 1
+    if quote or not "".join(buf).strip():
+        return None
+    parts.append("".join(buf).strip())
+    return parts
+
+
+def powershell_read_only(cmd: str) -> bool:
+    """PowerShell 로 실행되는 읽기 전용 명령인지 (powershell -Command 로 감싼 것 또는 Get-Content 같은 cmdlet)."""
+    script = _powershell_script(cmd)
+    if script is None:
+        first = (cmd or "").strip().split(None, 1)[0].lower() if (cmd or "").strip() else ""
+        if "-" not in first or first not in PS_READ_CMDLETS:
+            return False  # 감싸지 않은 명령은 Get-Content 처럼 동사-명사 cmdlet 으로 시작할 때만
+        script = cmd
+    segments = _powershell_segments(script)
+    if not segments:
+        return False
+    for seg in segments:
+        name = seg.split(None, 1)[0].lower()
+        if name == "git":
+            try:
+                if not (is_read_command(seg) and not write_options(seg)):
+                    return False
+            except ValueError:
+                return False
+        elif name not in PS_READ_CMDLETS:
+            return False
+        elif name == "rg" and re.search(r"(^|\s)--pre\b", seg):
+            return False
+    return True
+
+
 def read_only_command(cmd: str) -> bool:
     """파일을 바꾸지 않는 읽기 명령(ls, cat, grep, git log …)만으로 이뤄졌는지. 해석이 모호하면 False."""
+    if powershell_read_only(cmd):
+        return True
     try:
         parts = split_commands(cmd or "")
         return bool(parts) and not writes_output(cmd) and all(_read_part(p) for p in parts)
@@ -403,6 +498,11 @@ class Policy:
             if req.kind == "tool" and not (req.tool in PLAN_TOOLS | NETWORK_TOOLS
                                            or tool_matches(req.tool, role.auto_tools)):
                 return DENY, PLAN_DENY_TEXT
+        if req.kind == "command" and powershell_read_only(req.command or ""):
+            hits = [r for r in self.human_res if r.search(req.command or "") and PATH_RULE_HINT not in r.pattern]
+            if hits:
+                return HUMAN, "위험 명령(삭제·push·네트워크·권한·프로젝트 밖 경로 등)"
+            return AUTO, "읽기 전용 명령 (PowerShell)"
         if req.kind == "command":
             try:
                 parsed_parts = split_commands(req.command or "")

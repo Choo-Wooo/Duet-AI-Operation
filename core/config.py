@@ -109,6 +109,11 @@ DEFAULT_POLICY = {
         r"\bkill(all)?\b|\bpkill\b",
         r"\bmkfs\b|\bdd\s+if=",
         r"(^|\s)(~|/etc|/usr|/System|/Library)(/|\s|$)",
+        # Windows (PowerShell·cmd)
+        r"(?i)\b(Remove-Item|rd|rmdir|del|erase)\b.*\s[-/](Recurse|r|s)\b",
+        r"(?i)\b(Invoke-WebRequest|iwr|Invoke-RestMethod|irm|Start-BitsTransfer|curl\.exe|wget\.exe)\b",
+        r"(?i)\b(Stop-Process|taskkill|Set-ExecutionPolicy|Start-Process\b.*-Verb\s+RunAs)\b",
+        r"(?i)\breg(\.exe)?\s+(add|delete|import)\b|\bformat(\.com)?\s+[a-z]:",
     ],
     # 보호 경로: 쓰기 시 사람 확인 (glob, 프로젝트 기준)
     "protected_paths": [".env", ".env.*", "**/.env", "**/.env.*", "**/*.pem", "**/*.key",

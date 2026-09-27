@@ -78,6 +78,7 @@ def test_ask_is_read_only():
 
 def test_launch_window_builds_terminal_command(tmp_path, monkeypatch):
     calls = []
+    monkeypatch.setattr(ask, "WINDOWS", False)
     monkeypatch.setattr(ask.sys, "platform", "darwin")
     monkeypatch.delenv("TERM_PROGRAM", raising=False)
     monkeypatch.setattr(ask.subprocess, "run", lambda args, **kw: calls.append(args))
@@ -93,5 +94,29 @@ def test_stop_all_signals_and_cleans(tmp_path, monkeypatch):
     d.mkdir(parents=True)
     (d / "4242.pid").write_text("4242")
     killed = []
+    monkeypatch.setattr(ask, "WINDOWS", False)
     monkeypatch.setattr(ask.os, "kill", lambda pid, sig: killed.append(pid))
+    assert ask.stop_all(tmp_path) == 1 and killed == [4242] and not list(d.glob("*.pid"))
+
+
+def test_launch_window_windows_opens_new_console(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ask, "WINDOWS", True)
+    monkeypatch.setattr(ask.subprocess, "CREATE_NEW_CONSOLE", 0x10, raising=False)
+    monkeypatch.setattr(ask.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(ask.subprocess, "Popen", lambda args, **kw: calls.append((args, kw)))
+    msg = ask.launch_window(tmp_path / "duet", tmp_path, "architect")
+    assert "질문 콘솔" in msg
+    args, kw = calls[0]
+    assert args[-3:] == ["--no-venv", "--ask", "architect"] and kw["cwd"] == str(tmp_path)
+    assert kw["env"]["DUET_ASK_WINDOW"] == "1" and kw["creationflags"] & 0x10
+
+
+def test_stop_all_windows_kills_process_tree(tmp_path, monkeypatch):
+    d = tmp_path / ".duet" / "asks"
+    d.mkdir(parents=True)
+    (d / "4242.pid").write_text("4242")
+    killed = []
+    monkeypatch.setattr(ask, "WINDOWS", True)
+    monkeypatch.setattr(ask, "terminate_tree", killed.append)
     assert ask.stop_all(tmp_path) == 1 and killed == [4242] and not list(d.glob("*.pid"))

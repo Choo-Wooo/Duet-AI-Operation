@@ -27,7 +27,38 @@ def _prepare_import_path():
     return here
 
 
+def _windows_console():
+    """Windows: 출력이 파이프·파일로 갈 때도 한글·기호가 깨지거나 오류 나지 않게 UTF-8 로."""
+    import os
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream and not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            elif stream:
+                stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+    try:  # 콘솔 코드 페이지를 UTF-8 로 (자식 CLI 출력·ANSI 색 표시용)
+        import atexit
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        old_out, old_in = k32.GetConsoleOutputCP(), k32.GetConsoleCP()
+        if old_out and old_in:
+            k32.SetConsoleOutputCP(65001)
+            k32.SetConsoleCP(65001)
+            atexit.register(lambda: (k32.SetConsoleOutputCP(old_out), k32.SetConsoleCP(old_in)))
+        handle = k32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if k32.GetConsoleMode(handle, ctypes.byref(mode)):
+            k32.SetConsoleMode(handle, mode.value | 0x0004)  # ANSI 색 코드
+    except Exception:
+        pass
+
+
 def main():
+    _windows_console()
     _prepare_import_path()
     import importlib
 

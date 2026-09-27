@@ -12,6 +12,7 @@ from typing import Any
 
 from .. import __version__
 from ..core.clis import which
+from ..core.procs import group_kwargs, reap
 from ..core.policy import ApprovalRequest, Decision
 from ..core.prompts import REVIEW_SYSTEM
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
@@ -45,7 +46,7 @@ class CodexAdapter(AgentAdapter):
         self.proc = await asyncio.create_subprocess_exec(
             exe, "app-server",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.project), limit=64 * 1024 * 1024, env=os.environ.copy(),
+            cwd=str(self.project), limit=64 * 1024 * 1024, env=os.environ.copy(), **group_kwargs(),
         )
         self._reader = asyncio.create_task(self._read_loop())
         self._err_reader = asyncio.create_task(self._read_stderr())
@@ -351,7 +352,9 @@ class CodexAdapter(AgentAdapter):
                 self.proc.stdin.close()  # type: ignore[union-attr]
                 await asyncio.wait_for(self.proc.wait(), 3)
             except Exception:
-                self.proc.kill()
+                pass
+        if self.proc:
+            await reap(self.proc)  # 자손(MCP 서버·명령)까지 정리하고 파이프를 닫는다
         for t in (getattr(self, "_reader", None), getattr(self, "_err_reader", None)):
             if t:
                 t.cancel()

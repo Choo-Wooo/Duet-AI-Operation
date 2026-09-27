@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from .dialogue import control_text, without_directives
+from .fsutil import is_junction
 
 PHASES = ("plan", "plan_review", "implement", "verify")
 VERSION = re.compile(r"^## v(\d+)(?: \(deviation\))?\s*$", re.M)
@@ -162,7 +163,8 @@ def fingerprint(project: Path, exclude: list[str] | None = None) -> tuple[dict[s
         directory = Path(root)
         rel_dir = directory.relative_to(project).as_posix()
         dirs[:] = sorted(d for d in dirs if d not in excluded_dirs
-                         and not (rel_dir == ".duet" and d in DUET_RUNTIME))
+                         and not (rel_dir == ".duet" and d in DUET_RUNTIME)
+                         and not is_junction(directory / d))  # Windows 정션은 따라가지 않는다
         for name in sorted(files):
             if name in excluded_files:
                 continue

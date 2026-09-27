@@ -131,7 +131,7 @@ def test_protected_paths_and_cache(tmp_path, source, path):
     if source == "default":
         conf = DEFAULT_POLICY
     elif project_policy.exists():
-        conf = yaml.safe_load(project_policy.read_text())
+        conf = yaml.safe_load(project_policy.read_text(encoding="utf-8"))
     else:  # 새로 받은 저장소(CI 등): duet 이 저장하는 형태 그대로 왕복
         conf = yaml.safe_load(yaml.safe_dump(DEFAULT_POLICY, allow_unicode=True))
     pol = Policy(tmp_path, conf, "architect")
@@ -140,6 +140,7 @@ def test_protected_paths_and_cache(tmp_path, source, path):
     assert pol.classify(req, ROLES[1])[0] == HUMAN
 
 
+@pytest.mark.symlink
 def test_resolved_paths_and_readonly_writable(policy, tmp_path):
     (tmp_path / "secrets").mkdir()
     (tmp_path / "alias").symlink_to(tmp_path / "secrets", target_is_directory=True)

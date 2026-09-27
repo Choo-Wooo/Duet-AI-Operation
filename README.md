@@ -62,9 +62,9 @@ flowchart LR
 
 | 항목 | 내용 |
 | --- | --- |
-| 운영체제 | macOS, Linux (Windows는 지원 작업 중) |
-| Python | 3.10 이상. 없으면 `uv`가 파이썬 3.12를 받아 씁니다 |
-| uv | 권장. 의존성 설치가 빠르고 파이썬 버전 문제를 피합니다 (설치 스크립트가 함께 설치) |
+| 운영체제 | macOS, Linux, Windows 10/11 |
+| Python | 3.10 이상. 없으면 Homebrew Python·`py` 런처·`uv`를 찾아 사용 (`uv`는 파이썬 3.12를 받아 씀) |
+| uv | macOS·Linux 권장. 의존성 설치가 빠르고 파이썬 버전 문제를 피합니다 (설치 스크립트가 함께 설치) |
 | git | 턴 스냅샷, 롤백, 병렬 작업에 필요. 하위 폴더 프로젝트의 병렬 병합은 2.45 이상 |
 | CLI | `claude`, `codex`, `agy` 중 쓰려는 것이 설치·로그인되어 있어야 합니다 |
 | Node.js | 디자이너의 브라우저 도구(Playwright MCP)를 쓸 때 `npx` 필요 |
@@ -130,6 +130,27 @@ python3 duet          # 터미널 분할 화면(TUI)
 3. 각 CLI의 로그인 계정을 확인해 구독인지 API 키 과금인지 알려 줍니다.
 4. `.duet/modes.yaml`, `.duet/policy.yaml`, `DIALOGUE.md`를 만듭니다.
 5. git 저장소가 아니면 `git init`을 하고, `.gitignore`에 duet 폴더와 런타임 파일을 추가합니다.
+
+### Windows
+
+처음에는 `duet\setup-windows.bat` 을 실행해 환경을 점검·설치합니다 (탐색기에서 더블클릭해도 됩니다).
+
+```bat
+duet\setup-windows.bat          :: 점검하고, 빠진 것은 하나씩 물어본 뒤 설치 (winget·npm·공식 설치 스크립트)
+duet\setup-windows.bat /check   :: 점검만
+duet\setup-windows.bat /yes     :: 묻지 않고 빠진 것 모두 설치
+```
+
+Python 3.10+, Git(2.45+ 권장)·Git Bash, Node.js, claude/codex/agy 설치와 로그인 여부, `.duet\venv` 가상환경을 확인합니다. agy 는 자동 설치하지 않으므로 https://antigravity.google 안내에 따라 설치하세요.
+
+그다음 PowerShell 에서 `python duet --web` (또는 `py duet --web`)으로 실행합니다. macOS 와 다른 점은 다음과 같습니다.
+
+- CLI 는 `claude.exe`(네이티브 설치 `~\.local\bin`), npm 전역 설치(`%APPDATA%\npm`), Codex·agy 설치 폴더에서도 찾습니다.
+- 에이전트가 합의한 테스트 명령은 Git Bash 로 실행합니다(에이전트가 bash 문법으로 쓰기 때문). Git Bash 가 없으면 `cmd` 로 실행합니다.
+- Codex·agy 는 Windows 에서 PowerShell 로 명령을 실행합니다. `Get-Content`, `Get-ChildItem`, `Select-String` 같은 읽기 전용 명령은 자동 허용하고, `Remove-Item -Recurse`, `Invoke-WebRequest`, `Stop-Process` 등은 사람 확인 대상입니다. 이 규칙은 새로 만드는 `.duet/policy.yaml` 에 들어가므로, 기존 프로젝트는 `policy.yaml` 을 지우고 다시 실행하면 반영됩니다.
+- 병렬 작업 워크트리의 `node_modules`·`.venv` 링크는 관리자 권한이 필요 없는 정션(junction)으로 만듭니다.
+- agy 권한 훅은 유닉스 소켓 대신 127.0.0.1 의 임시 포트(토큰 확인)로 duet 과 통신합니다.
+- `/ask` 질문 콘솔은 새 콘솔 창으로 열립니다. 승인 요청 알림은 브라우저 탭이 없을 때 Windows 알림으로 뜹니다.
 
 `--web`은 이 컴퓨터(127.0.0.1)에서만 열리는 서버를 띄우고, 실행마다 새로 만든 토큰이 붙은 주소를 브라우저로 엽니다. 토큰 없는 요청은 거부합니다. 종료는 터미널에서 `Ctrl+C`입니다.
 

@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import signal
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -28,6 +26,7 @@ import yaml
 from .agreement import parse_plan
 from .dialogue import extract_directives
 from .policy import ApprovalRequest, Decision, Policy, AUTO, read_only_decision
+from .procs import close_transport, create_shell, kill_tree
 from .prompts import BACKGROUND_WAIT
 from .worktrees import GitError, Worktrees, valid_id
 
@@ -721,8 +720,8 @@ class WorkBoard:
                 return 126, f"사람이 테스트 실행을 거부: {d.reason}"
         timeout = float(self.cfg.settings.get("work_test_timeout") or 900)
         self.orch.bus.emit("tool", f"duet#{it.id}", name="test", detail="$ " + command)
-        proc = await asyncio.create_subprocess_shell(command, cwd=str(path), stdout=asyncio.subprocess.PIPE,
-                                                     stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        proc = await create_shell(command, cwd=str(path), stdout=asyncio.subprocess.PIPE,
+                                  stderr=asyncio.subprocess.STDOUT)
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout)
         except asyncio.TimeoutError:
@@ -731,17 +730,16 @@ class WorkBoard:
         except asyncio.CancelledError:
             await self._kill_test_group(proc)
             raise
+        close_transport(proc)
         text = out.decode(errors="replace")
         self.orch.bus.emit("tool_output", f"duet#{it.id}", text=text[-800:], ok=proc.returncode == 0)
         return proc.returncode or 0, text[-4000:]
 
     @staticmethod
     async def _kill_test_group(proc) -> None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        kill_tree(proc.pid)
         await proc.wait()
+        close_transport(proc)
 
     async def _verify(self, it: WorkItem, path: Path, report: str) -> str | None:
         """합의 테스트를 실행하고 설계자 분신이 검토. 재작업 사유(통과면 None)."""

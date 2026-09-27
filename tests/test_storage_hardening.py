@@ -32,7 +32,7 @@ def test_invalid_encoding_or_nonobject_json_backed_up(tmp_path, payload, kind):
 
 
 def test_hash_excludes_all_duet_and_ignore_is_idempotent():
-    with tempfile.TemporaryDirectory(dir='/tmp') as root:
+    with tempfile.TemporaryDirectory(dir='/tmp' if os.name != 'nt' else None) as root:
         p = Path(root)
         git(p, 'init', '-q')
         git(p, 'config', 'user.name', 'Test')

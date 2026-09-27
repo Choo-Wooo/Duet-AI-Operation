@@ -5,7 +5,7 @@
    검증된 버전을 고정한 requirements.lock 을 먼저 쓰고, 그 플랫폼에서 실패하면 requirements.txt(범위 지정)로 다시 시도한다.
    uv 가 있으면 uv 로 설치한다 (빠르고, 파이썬 3.10+ 이 없으면 uv 가 받아 온다).
 3. 설치 내용이 바뀌었을 때만 다시 설치한다 (해시 비교).
-4. 그 가상환경의 파이썬으로 duet 을 다시 실행한다 (os.execv).
+4. 그 가상환경의 파이썬으로 duet 을 다시 실행한다 (os.execv, Windows 는 자식 프로세스로 실행 후 대기).
 """
 import hashlib
 import os
@@ -48,6 +48,9 @@ def _find_python():
     for v in PREFERRED:
         candidates.append(shutil.which("python" + v))
     candidates.append(shutil.which("python3"))
+    if os.name == "nt":
+        candidates.extend(_py_launcher())
+        candidates.append(shutil.which("python"))
     for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
         for v in PREFERRED:
             candidates.append(prefix + "/python" + v)
@@ -60,6 +63,23 @@ def _find_python():
         if ver and ver >= MIN_PY:
             return c
     return None
+
+
+def _py_launcher():
+    """Windows 의 py 런처로 설치된 파이썬들을 찾는다."""
+    py = shutil.which("py")
+    if not py:
+        return []
+    found = []
+    for v in PREFERRED:
+        try:
+            out = subprocess.run([py, "-" + v, "-c", "import sys;print(sys.executable)"],
+                                 capture_output=True, text=True, timeout=15)
+            if out.returncode == 0 and out.stdout.strip():
+                found.append(out.stdout.strip())
+        except Exception:
+            pass
+    return found
 
 
 def _requirements_hash(req_file):
@@ -88,10 +108,15 @@ def _create_venv(venv):
         subprocess.run([uv, "venv", "--python", "3.12", str(venv)], check=True)
         return "uv"
     _say("파이썬 3.10 이상이 필요합니다. 다음 중 하나를 설치한 뒤 다시 실행하세요.")
-    _say("  curl -LsSf https://astral.sh/uv/install.sh | sh   (uv, 권장: 파이썬을 자동으로 받아 씀)")
-    _say("  brew install python@3.12      (macOS Homebrew)")
-    _say("  sudo apt install python3.12 python3.12-venv   (Debian·Ubuntu)")
-    _say("환경 점검: python3 duet --doctor")
+    if os.name == "nt":
+        _say("  winget install Python.Python.3.12")
+        _say("  또는 https://www.python.org/downloads/windows/")
+        _say("환경 점검: setup-windows.bat /check")
+    else:
+        _say("  curl -LsSf https://astral.sh/uv/install.sh | sh   (uv, 권장: 파이썬을 자동으로 받아 씀)")
+        _say("  brew install python@3.12      (macOS Homebrew)")
+        _say("  sudo apt install python3.12 python3.12-venv   (Debian·Ubuntu)")
+        _say("환경 점검: python3 duet --doctor")
     sys.exit(1)
 
 
@@ -131,17 +156,25 @@ def ensure_environment(duet_dir, project_dir, argv):
     want = _requirements_hash(req_file) + '-py%d.%d' % sys.version_info[:2]
 
     inside = Path(sys.prefix).resolve() == venv.resolve()
-    if inside and marker.exists() and marker.read_text().strip() == want:
+    if inside and marker.exists() and marker.read_text(encoding="utf-8").strip() == want:
         return
 
     try:
         installer = "pip"
+        if venv.exists() and not inside and (not vpy.exists() or not (venv / "pyvenv.cfg").exists()
+                                             or _py_version(vpy) is None):
+            # 지우다 만 가상환경(파일이 잠겨 일부만 지워진 경우 등): 치우고 새로 만든다
+            _say("가상환경이 손상돼 다시 만듭니다: %s" % venv)
+            shutil.rmtree(venv, ignore_errors=True)
+            if venv.exists():
+                _say("가상환경 폴더를 지우지 못했습니다. 실행 중인 duet 을 모두 끄고 .duet/venv 를 지운 뒤 다시 실행하세요.")
+                sys.exit(1)
         if not vpy.exists():
             venv.parent.mkdir(parents=True, exist_ok=True)
             installer = _create_venv(venv)
-        if not marker.exists() or marker.read_text().strip() != want:
+        if not marker.exists() or marker.read_text(encoding="utf-8").strip() != want:
             _install(venv, req_file, installer)
-            marker.write_text(want)
+            marker.write_text(want, encoding="utf-8")
     except subprocess.CalledProcessError as e:
         _say("환경 준비에 실패했습니다: %s" % e)
         _say("원인 확인: python3 duet --doctor   (네트워크·파이썬·uv 상태를 점검합니다)")
@@ -151,5 +184,15 @@ def ensure_environment(duet_dir, project_dir, argv):
     if inside:
         return
     os.environ["DUET_BOOTSTRAPPED"] = "1"
+    os.environ.setdefault("PYTHONUTF8", "1")  # Windows 기본 코드 페이지(cp949 등) 대신 UTF-8
     args = [str(vpy), str(duet_dir)] + list(argv)
+    if os.name == "nt":
+        # Windows 의 os.execv 는 프로세스를 바꾸지 못하고 새 프로세스를 띄운 뒤 바로 끝난다.
+        # 그러면 셸 프롬프트가 먼저 돌아와 출력·입력이 뒤섞이므로, 자식이 끝날 때까지 기다린다.
+        import signal
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C 는 같은 콘솔의 자식이 처리한다
+        try:
+            sys.exit(subprocess.call(args))
+        except KeyboardInterrupt:
+            sys.exit(130)
     os.execv(str(vpy), args)
