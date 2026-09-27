@@ -34,7 +34,8 @@ AUTOPILOT_DENY = [
 READ_COMMAND = re.compile(
     r"^(?:ls|pwd|cat|head|tail|wc|grep|egrep|rg|find|tree|which|diff|stat|file|du|df|sort|uniq|cut|tr|nl|column|"
     r"comm|paste|xxd|od|hexdump|jq|basename|dirname|realpath|readlink|date|whoami|uname|ps|test|true|echo|"
-    r"printf|git (?:status|diff|log|show|branch|rev-parse|ls-files|blame|grep))\b"
+    r"printf|zipinfo|unzip|tar|shasum|sha1sum|sha256sum|sha512sum|md5sum|md5|cksum|identify|sips|mdls|"
+    r"git (?:status|diff|log|show|branch|rev-parse|ls-files|blame|grep))\b"
     r"|^sed(?![^|]*\s-i)\b"            # sed (단 -i 제자리 수정 제외)
     r"|^awk(?![^|]*system\s*\()\b"    # awk (단 system() 호출 제외)
 )
@@ -136,6 +137,17 @@ def write_options(part: str) -> bool:
         return any(a == "--pre" or a.startswith("--pre=") for a in args)
     if name == "tree":
         return any(a.startswith("-") and not a.startswith("--") and "o" in a for a in args)
+    if name == "unzip":  # 목록·검사만 (-l, -v, -Z, -t). 압축 풀기는 쓰기
+        return not any(re.match(r"^-[a-zA-Z]*[lvZt]", a) for a in args) or any(a in ("-d",) or a.startswith("-o") for a in args)
+    if name == "tar":  # 목록(t)만
+        mode = args[0].lstrip("-") if args else ""
+        return not ("t" in mode and not set(mode) & set("xcruA")) and "--list" not in args
+    if name == "sips":  # 속성 읽기(-g)만
+        return not args or any(a in ("-s", "--setProperty", "-r", "--rotate", "-f", "--flip", "-c", "-z", "-Z", "-p", "-o",
+                                     "--out", "-i", "--addIcon", "-e", "--embedProfile", "-m", "--matchTo",
+                                     "--resampleWidth", "--resampleHeight", "--cropToHeightWidth", "--padToHeightWidth",
+                                     "--deleteProperty", "--deleteTag", "--setTag", "--optimizeColorForSharing")
+                               or a.startswith("--resample") for a in args)
     if name in {"xxd", "uniq"}:
         return _has_output_operand(name, args)
     if name == "git" and args:
@@ -169,6 +181,13 @@ def _tokens(cmd: str) -> list[tuple[str, bool]]:
         elif c in "'\"":
             quote = c
             buf.append(c)
+        elif c == "\\" and cmd.startswith((" ", "\n"), i + 1):
+            # 따옴표 밖의 역슬래시는 공백 이스케이프(Application\ Support)와 줄 이음만 허용. 그 밖은 모호한 구문
+            if cmd[i + 1] == "\n":
+                flush()
+            else:
+                buf.append("\\ ")
+            i += 1
         elif c == "\\" or c == "`" or cmd.startswith(("$(", "<(", ">(", "<<"), i):
             raise ValueError("ambiguous shell syntax")
         elif c in ";&|<>\n":
@@ -189,12 +208,26 @@ def _tokens(cmd: str) -> list[tuple[str, bool]]:
     return out
 
 
+# 명령 해석·실행을 바꿀 수 있는 변수 (읽기 전용 판정에서 허용하지 않음)
+_UNSAFE_VARS = re.compile(r"^(?:PATH|IFS|ENV|BASH_ENV|CDPATH|PS4|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|GLOBIGNORE|"
+                          r"LD_\w*|DYLD_\w*|PYTHON\w*|NODE_OPTIONS|PERL5\w*|RUBYOPT|GIT_\w*)=")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _read_part(part: str) -> bool:
+    """한 부분 명령이 읽기인지. 변수 지정만 있는 부분(R=경로)도 읽기로 본다."""
+    toks = shlex.split(part)
+    if toks and all(_ASSIGN.match(t) for t in toks):
+        # 셸 변수 지정만 있는 부분 (R=경로). 명령 앞에 붙는 환경변수(PAGER=… git show)는 프로그램 동작을 바꿀 수 있어 허용하지 않음
+        return not any(_UNSAFE_VARS.match(t) for t in toks)
+    return part.startswith("cd ") or (is_read_command(part) and not write_options(part))
+
+
 def read_only_command(cmd: str) -> bool:
     """파일을 바꾸지 않는 읽기 명령(ls, cat, grep, git log …)만으로 이뤄졌는지. 해석이 모호하면 False."""
     try:
         parts = split_commands(cmd or "")
-        return bool(parts) and not writes_output(cmd) and all(
-            (is_read_command(p) and not write_options(p)) or p.startswith("cd ") for p in parts)
+        return bool(parts) and not writes_output(cmd) and all(_read_part(p) for p in parts)
     except (ValueError, RecursionError):
         return False
 
@@ -385,7 +418,7 @@ class Policy:
                     return HUMAN, "합의 명령이지만 기존 위험 명령 정책에 해당합니다."
                 return AUTO, "합의된 검증 명령 (1회)"
             parts = split_commands(req.command or "")
-            if not (parts and all(is_read_command(p) or p.startswith("cd ") for p in parts)
+            if not (parts and all(_read_part(p) for p in parts)
                     and not writes_output(req.command or "")):
                 return HUMAN, "verify 단계의 합의 명령·읽기 외 명령 (사람 확인)"
         read_only = role.permissions == "read_only"
@@ -411,8 +444,7 @@ class Policy:
             cmd = req.command or ""
             parts = split_commands(cmd)
             redirect = writes_output(cmd)
-            read_only_cmd = bool(parts) and not redirect and all(
-                is_read_command(p) or p.startswith("cd ") for p in parts)
+            read_only_cmd = bool(parts) and not redirect and all(_read_part(p) for p in parts)
             hits = [r for r in self.human_res if r.search(cmd)]
             if read_only_cmd:  # 읽기만 하는 명령은 프로젝트 밖 경로 규칙을 적용하지 않는다
                 hits = [r for r in hits if PATH_RULE_HINT not in r.pattern]
