@@ -63,13 +63,14 @@ class ConsoleUI:
     async def ask_approval(self, req: ApprovalRequest, reason: str, opinion: str | None) -> Decision:
         text = (f"\n[승인 요청] {req.role}: {req.summary}\n  사유: {reason}"
                 + (f"\n  설계자 의견: {opinion}" if opinion else "")
-                + "\n  y=허용  a=세션 동안 허용  n=거부(이유 입력 가능: n 이유)")
-        ans = await self._ask(text)
-        if ans.lower().startswith("a"):
+                + "\n  y/yes/allow=허용  a/s/session=세션 동안 허용  n=거부(이유 입력 가능: n 이유)")
+        ans = (await self._ask(text)).strip()
+        if ans.lower() in {"a", "s", "session"}:
             return Decision(True, "사람 허용(세션)", scope="session", by="human")
-        if ans.lower().startswith("y"):
+        if ans.lower() in {"y", "yes", "allow"}:
             return Decision(True, "사람 허용", by="human")
-        return Decision(False, ans[1:].strip() or "사람이 거부", by="human")
+        reason = ans[1:].strip() if ans.lower() == "n" or ans.lower().startswith("n ") else ans
+        return Decision(False, reason or "사람이 거부", by="human")
 
     async def ask_choice(self, title: str, body: str, options: list[tuple[str, str]]) -> str:
         opts = "  ".join(f"{i + 1}={label}" for i, (_, label) in enumerate(options))

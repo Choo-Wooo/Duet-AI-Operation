@@ -109,7 +109,7 @@ def ensure_environment(duet_dir, project_dir, argv):
     vpy = _venv_python(venv)
     req_file = duet_dir / "requirements.txt"
     marker = venv / ".duet-requirements"
-    want = _requirements_hash(req_file)
+    want = _requirements_hash(req_file) + '-py%d.%d' % sys.version_info[:2]
 
     inside = Path(sys.prefix).resolve() == venv.resolve()
     if inside and marker.exists() and marker.read_text().strip() == want:

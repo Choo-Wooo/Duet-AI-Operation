@@ -33,25 +33,170 @@ AUTOPILOT_DENY = [
 # 읽기 전용 명령 (모든 역할·모든 단계에서 파일로 리다이렉트하지 않으면 자동 허용)
 READ_COMMAND = re.compile(
     r"^(?:ls|pwd|cat|head|tail|wc|grep|egrep|rg|find|tree|which|diff|stat|file|du|df|sort|uniq|cut|tr|nl|column|"
-    r"comm|paste|xxd|od|hexdump|jq|less|more|basename|dirname|realpath|readlink|date|whoami|uname|ps|test|true|echo|"
+    r"comm|paste|xxd|od|hexdump|jq|basename|dirname|realpath|readlink|date|whoami|uname|ps|test|true|echo|"
     r"printf|git (?:status|diff|log|show|branch|rev-parse|ls-files|blame|grep))\b"
     r"|^sed(?![^|]*\s-i)\b"            # sed (단 -i 제자리 수정 제외)
     r"|^awk(?![^|]*system\s*\()\b"    # awk (단 system() 호출 제외)
 )
 # find 의 파일 변경 옵션
-_FIND_WRITES = re.compile(r"\s-(?:delete|exec|execdir|ok|fprint\w*)\b")
+_FIND_WRITES = re.compile(r"\s-(?:delete|exec|execdir|ok|fls|fprint\w*)\b")
 # 경로 규칙(~, /etc, /usr …): 읽기 전용 명령에는 적용하지 않는다
 PATH_RULE_HINT = "/etc"
+TRUSTED_BIN_DIRS = {"/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"}
+
+
+def _command_name(word: str) -> str:
+    # Do not resolve or normalize '..': only these literal prefixes are trusted.
+    directory, _, name = word.rpartition("/")
+    return name if directory in TRUSTED_BIN_DIRS else word
+
+
+def _plain_command(part: str) -> bool:
+    first = shlex.split(part)[0]
+    return "/" not in first and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first)
+
+
+def _branch_is_read(args: list[str]) -> bool:
+    listing = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in {"-l", "--list"}:
+            listing = True
+        elif arg in {"-a", "-r", "-v", "-vv", "--show-current"}:
+            pass
+        elif arg in {"--contains", "--merged"}:
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                i += 1
+        elif arg.startswith(("--contains=", "--merged=")):
+            pass
+        elif arg.startswith("-") or not listing:
+            return False
+        i += 1
+    return True
+
+
+def _has_output_operand(name: str, args: list[str]) -> bool:
+    """xxd/uniq accept an output file after the input; unknown options need review."""
+    values = {"-c", "-g", "-l", "-o", "-s"} if name == "xxd" else {"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"}
+    flags = ({"-a", "-b", "-e", "-E", "-i", "-p", "-ps", "-r", "-u"} if name == "xxd" else
+             {"-c", "-d", "-u", "-i", "-z", "--count", "--repeated", "--unique", "--ignore-case", "--zero-terminated"})
+    operands, i, options = 0, 0, True
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+        elif options and arg in values:
+            i += 1
+            if i == len(args):
+                return True
+        elif options and arg in flags:
+            pass
+        elif options and any(arg.startswith(opt + "=") if opt.startswith("--") else
+                             arg.startswith(opt) and len(arg) > len(opt) for opt in values):
+            pass
+        elif options and arg.startswith("-") and arg != "-":
+            return True
+        else:
+            operands += 1
+        i += 1
+    return operands > 1
 
 
 def is_read_command(part: str) -> bool:
-    return bool(READ_COMMAND.search(part)) and not (part.startswith("find") and _FIND_WRITES.search(part))
+    toks = shlex.split(part)
+    if not toks:
+        return False
+    name = " ".join(toks[:2]) if toks[0] == "git" else toks[0]
+    return bool(READ_COMMAND.fullmatch(name)) and not write_options(part) and not (toks[0] == "find" and _FIND_WRITES.search(part))
+
+
+def write_options(part: str) -> bool:
+    toks = shlex.split(part)
+    if not toks:
+        return False
+    name, args = toks[0], toks[1:]
+    if name == "sed":
+        if any(a.startswith("--in-place") or (a.startswith("-") and not a.startswith(("--", "-e", "-f")) and "i" in a) for a in args):
+            return True
+        # Script files and execution/write commands require review. Conservatively
+        # inspect scripts, including substitution flags, without executing sed.
+        scripts = [re.sub(r"^-[nErsuz]*e", "", a) if re.match(r"^-[nErsuz]*e", a) else a.partition("=")[2]
+                   if a.startswith("--expression=") else a for a in args]
+        return any(a.startswith("--file") or re.match(r"^-[nErsuz]*f", a) for a in args) or any(
+            re.search(r"(?:^|[;{}\n])\s*(?:[0-9,$/\\.\s!]*)(?:w|W|e)\b", a)
+            or re.search(r"(?:/|!|\d)\s*[wWe](?:\s|$)", a)
+            or re.search(r"s(.).*?\1.*?\1[^;\n]*[weW]", a)
+            for a in scripts if not a.startswith("-"))
+    if name == "awk":
+        return any(">" in a or "|" in a or re.search(r"\bsystem\b", a) for a in args) or any(a.startswith("-f") for a in args)
+    if name == "sort":
+        return any(a.startswith(("--output", "--compress-program")) or (a.startswith("-") and not a.startswith("--") and "o" in a) for a in args)
+    if name == "rg":
+        return any(a == "--pre" or a.startswith("--pre=") for a in args)
+    if name == "tree":
+        return any(a.startswith("-") and not a.startswith("--") and "o" in a for a in args)
+    if name in {"xxd", "uniq"}:
+        return _has_output_operand(name, args)
+    if name == "git" and args:
+        sub, opts = args[0], args[1:]
+        return ((sub in {"diff", "log", "show"} and any(a.startswith("--output") for a in opts))
+                or (sub == "grep" and any(a.startswith("--open-files-in-pager") or a.startswith("-O") for a in opts))
+                or (sub == "branch" and not _branch_is_read(opts)))
+    return False
+
+
+def _tokens(cmd: str) -> list[tuple[str, bool]]:
+    """Keep raw quoted words separate from shell operators; shlex validates words."""
+    out, buf, quote, i = [], [], None, 0
+    def flush():
+        if buf:
+            raw = "".join(buf)
+            shlex.split(raw)
+            out.append((raw, False))
+            buf.clear()
+    while i < len(cmd):
+        c = cmd[i]
+        if quote:
+            buf.append(c)
+            if quote == '"' and c == "\\" and i + 1 < len(cmd):
+                i += 1
+                buf.append(cmd[i])
+            elif c == quote:
+                quote = None
+            elif quote == '"' and (cmd.startswith("$(", i) or c == "`"):
+                raise ValueError("shell substitution")
+        elif c in "'\"":
+            quote = c
+            buf.append(c)
+        elif c == "\\" or c == "`" or cmd.startswith(("$(", "<(", ">(", "<<"), i):
+            raise ValueError("ambiguous shell syntax")
+        elif c in ";&|<>\n":
+            flush()
+            op = next((op for op in ("&&", "||", ">&", "<&", "&>", ">>") if cmd.startswith(op, i)), c)
+            if op == "&":
+                raise ValueError("background command")
+            out.append((op, True))
+            i += len(op) - 1
+        elif c.isspace():
+            flush()
+        else:
+            buf.append(c)
+        i += 1
+    if quote:
+        raise ValueError("unclosed quote")
+    flush()
+    return out
 
 
 def read_only_command(cmd: str) -> bool:
-    """파일을 바꾸지 않는 읽기 명령(ls, cat, grep, git log …)만으로 이뤄졌는지."""
-    parts = split_commands(cmd or "")
-    return bool(parts) and not writes_output(cmd) and all(is_read_command(p) or p.startswith("cd ") for p in parts)
+    """파일을 바꾸지 않는 읽기 명령(ls, cat, grep, git log …)만으로 이뤄졌는지. 해석이 모호하면 False."""
+    try:
+        parts = split_commands(cmd or "")
+        return bool(parts) and not writes_output(cmd) and all(
+            (is_read_command(p) and not write_options(p)) or p.startswith("cd ") for p in parts)
+    except (ValueError, RecursionError):
+        return False
 
 
 def read_only_decision(req: "ApprovalRequest", what: str = "이 세션") -> "Decision":
@@ -67,9 +212,18 @@ def tool_matches(tool: str | None, patterns: list[str] | None) -> bool:
 
 def writes_output(cmd: str) -> bool:
     """파일로 리다이렉트하는지 (2>&1, >/dev/null 은 제외, 따옴표 안의 > 는 무시)."""
-    unquoted = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "", cmd)
-    stripped = re.sub(r"\d?>&\d|\d?>>?\s*/dev/null", "", unquoted)
-    return ">" in stripped or re.search(r"\btee\b", unquoted) is not None
+    try:
+        tokens = _tokens(cmd)
+        for i, (token, operator) in enumerate(tokens):
+            if operator and ">" in token:
+                target = shlex.split(tokens[i + 1][0])[0] if i + 1 < len(tokens) and not tokens[i + 1][1] else ""
+                if token == ">&" and target.isdigit():
+                    continue
+                if target != "/dev/null":
+                    return True
+        return any(shlex.split(p)[0] == "tee" or (p != cmd and writes_output(p)) for p in split_commands(cmd))
+    except (ValueError, IndexError, RecursionError):
+        return True
 
 
 @dataclass
@@ -88,7 +242,7 @@ class ApprovalRequest:
                 toks = shlex.split(self.command)
             except ValueError:
                 toks = self.command.split()
-            return f"{self.role}|cmd|{' '.join(toks[:2])}"
+            return f"{self.role}|cmd|{' '.join(toks)}"
         if self.kind == "file":
             return f"{self.role}|file|{'|'.join(sorted(self.paths))}"
         return f"{self.role}|{self.kind}|{self.tool or self.summary}"
@@ -104,50 +258,43 @@ class Decision:
 
 
 def _split_unquoted(cmd: str) -> list[str]:
-    """따옴표 밖의 &&, ||, ;, |, 줄바꿈 에서만 나눈다 (grep -E "a|b" 의 | 는 나누지 않음)."""
-    parts, buf, q, i = [], [], None, 0
-    while i < len(cmd):
-        c = cmd[i]
-        if q:
-            buf.append(c)
-            if c == "\\" and q == '"' and i + 1 < len(cmd):
-                buf.append(cmd[i + 1])
-                i += 1
-            elif c == q:
-                q = None
-        elif c in "'\"":
-            q = c
-            buf.append(c)
-        elif c == "\\" and i + 1 < len(cmd):
-            buf.append(c + cmd[i + 1])
-            i += 1
-        elif cmd.startswith(("&&", "||"), i):
-            parts.append("".join(buf))
-            buf = []
-            i += 1
-        elif c in ";|\n":
-            parts.append("".join(buf))
+    parts, buf = [], []
+    for token, operator in _tokens(cmd):
+        if operator and token in ("&&", "||", ";", "|", "\n"):
+            if not buf:
+                raise ValueError("empty command")
+            parts.append(" ".join(buf))
             buf = []
         else:
-            buf.append(c)
-        i += 1
-    parts.append("".join(buf))
-    return [p.strip() for p in parts if p.strip()]
+            buf.append(token)
+    if buf:
+        parts.append(" ".join(buf))
+    else:
+        raise ValueError("empty command")
+    return parts
 
 
-def split_commands(cmd: str) -> list[str]:
-    cmd = cmd.strip()
-    # bash -lc "..." 형태 벗기기 (codex 가 자주 이렇게 보냄)
-    m = re.match(r"^(?:/bin/)?(?:ba|z)?sh\s+-l?c\s+(['\"])(.*)\1$", cmd, re.S)
-    if m:
-        cmd = m.group(2)
+def split_commands(cmd: str, _depth: int = 0) -> list[str]:
+    if _depth > 32:
+        raise ValueError("shell nesting limit")
+    words = shlex.split(cmd)
+    if words and _command_name(words[0]) in ("bash", "sh", "zsh") and len(words) != 3:
+        raise ValueError("ambiguous shell wrapper")
     out = []
-    for p in _split_unquoted(cmd):
-        # 환경변수 접두어(FOO=bar cmd) 제거
-        p = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+", "", p)
-        # 첫 토큰의 경로 접두어 제거: /root/.local/bin/pytest → pytest, .venv/bin/python → python
-        p = re.sub(r"^(?:\S*/)(?=[^/\s]+(\s|$))", "", p)
-        out.append(p)
+    for part in _split_unquoted(cmd.strip()):
+        toks = shlex.split(part)
+        if not toks:
+            raise ValueError("empty command")
+        name = _command_name(toks[0])
+        if name in ("bash", "sh", "zsh"):
+            if len(toks) != 3 or toks[1] not in ("-c", "-lc"):
+                raise ValueError("ambiguous shell wrapper")
+            out.extend(split_commands(toks[2], _depth + 1))
+        else:
+            if name != toks[0]:
+                raw_name = _tokens(part)[0][0]
+                part = name + part[len(raw_name):]
+            out.append(part)
     return out
 
 
@@ -167,33 +314,47 @@ class Policy:
                 and req.kind == "command" and self.task["test_command"]):
             return False
         cmd, test = (req.command or "").strip(), self.task["test_command"].strip()
-        m = re.match(r"^(?:/bin/)?(?:ba|z)?sh\s+-l?c\s+(['\"])(.*)\1$", cmd, re.S)
-        if m:
-            cmd = m.group(2).strip()
-        cmd = re.sub(r"^cd\s+\S+\s*&&\s*", "", cmd)
         if cmd == test:
             return True
         if not cmd.startswith(test):
             return False
-        rest = cmd[len(test):].strip()
-        rest = re.sub(r"^2>&1\s*", "", rest)
-        if not rest.startswith("|"):
+        if cmd[len(test):] and not (cmd[len(test)].isspace() or cmd[len(test)] == "|"):
             return False
-        tail = _split_unquoted(rest[1:])
-        return bool(tail) and all(re.match(r"^(?:head|tail|grep|egrep|rg|wc|sed -n|cat)\b", p) for p in tail) \
-            and not writes_output(rest)
+        rest = cmd[len(test):].strip()
+        rest = re.sub(r"^2>&1(?=\s|\|)\s*", "", rest)
+        if not rest.startswith("|") or rest.startswith("||"):
+            return False
+        try:
+            tokens = _tokens(rest[1:])
+            if any(op and token != "|" for token, op in tokens):
+                return False
+            tail = _split_unquoted(rest[1:])
+            return bool(tail) and all(
+                (shlex.split(p)[0] in {"head", "tail", "grep", "rg", "wc", "cat"}
+                 or shlex.split(p)[:2] == ["sed", "-n"])
+                and is_read_command(p) and not writes_output(p) for p in tail)
+        except (ValueError, RecursionError):
+            return False
 
     # ---- 경로 ----
     def _rel(self, p: str) -> str | None:
         try:
             ap = (self.project / p).resolve() if not Path(p).is_absolute() else Path(p).resolve()
-            return ap.relative_to(self.project).as_posix()
-        except (ValueError, OSError):
+            return Path(str(ap).casefold()).relative_to(Path(str(self.project).casefold())).as_posix()
+        except (ValueError, OSError, RuntimeError):
             return None  # 프로젝트 밖
 
     @staticmethod
     def _match(rel: str, globs: list[str]) -> bool:
-        return any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch("/" + rel, "/" + g) for g in globs)
+        def variants(pattern):
+            yield pattern
+            start = pattern.find("**/")
+            if start >= 0:
+                for suffix in variants(pattern[start + 3:]):
+                    yield pattern[:start] + suffix
+                    yield pattern[:start + 3] + suffix
+        return any(fnmatch.fnmatchcase(rel.casefold(), pattern)
+                   for g in globs for pattern in variants(g.casefold()))
 
     # ---- 분류 ----
     def classify(self, req: ApprovalRequest, role: Role) -> tuple[str, str]:
@@ -209,6 +370,13 @@ class Policy:
             if req.kind == "tool" and not (req.tool in PLAN_TOOLS | NETWORK_TOOLS
                                            or tool_matches(req.tool, role.auto_tools)):
                 return DENY, PLAN_DENY_TEXT
+        if req.kind == "command":
+            try:
+                parsed_parts = split_commands(req.command or "")
+            except (ValueError, RecursionError):
+                return HUMAN, "해석이 모호한 셸 구문 (사람 확인)"
+            if any(write_options(p) for p in parsed_parts):
+                return HUMAN, "읽기 명령의 쓰기·실행 옵션 (사람 확인)"
         if self.task and self.task["phase"] == "verify" and role.name == self.main_role and req.kind == "command":
             if self.verification_command(req):
                 # 실행 파일 절대경로(/usr/bin/python3 등)는 경로 규칙에서 뺀다
@@ -220,9 +388,10 @@ class Policy:
             if not (parts and all(is_read_command(p) or p.startswith("cd ") for p in parts)
                     and not writes_output(req.command or "")):
                 return HUMAN, "verify 단계의 합의 명령·읽기 외 명령 (사람 확인)"
-        if not plan and req.cache_key() in self.session_allow:
-            return AUTO, "이번 세션에서 이미 허용한 요청"
         read_only = role.permissions == "read_only"
+        cached = not plan and req.cache_key() in self.session_allow
+        if cached and req.kind not in ("file", "command"):
+            return AUTO, "이번 세션에서 이미 허용한 요청"
 
         if req.kind == "file":
             rels = [self._rel(p) for p in req.paths] or [None]
@@ -230,6 +399,8 @@ class Policy:
                 return HUMAN, "프로젝트 밖 경로에 쓰기"
             if any(self._match(r, self.conf.get("protected_paths", [])) for r in rels):
                 return HUMAN, "보호된 경로(.env, 키, .git 등)에 쓰기"
+            if cached:
+                return AUTO, "이번 세션에서 이미 허용한 요청"
             if read_only:
                 if all(self._match(r, self.conf.get("readonly_writable", [])) for r in rels):
                     return AUTO, "읽기 전용 역할의 허용 경로"
@@ -247,16 +418,18 @@ class Policy:
                 hits = [r for r in hits if PATH_RULE_HINT not in r.pattern]
             if hits:
                 return HUMAN, "위험 명령(삭제·push·네트워크·권한·프로젝트 밖 경로 등)"
+            if not plan and req.cache_key() in self.session_allow:
+                return AUTO, "이번 세션에서 이미 허용한 요청"
             if read_only_cmd:
                 return AUTO, "읽기 전용 명령"
             if not redirect and parts and all(
-                    (any(r.search(p) for r in self.auto_res) and not _FIND_WRITES.search(p)
+                    (_plain_command(p) and any(r.search(p) for r in self.auto_res) and not _FIND_WRITES.search(p)
                      and not (read_only and re.match(r"^(?:mkdir|touch|cp|mv)\b", p)))
                     or is_read_command(p) or p.startswith("cd ")
                     for p in parts):
                 return AUTO, "안전한 명령"
             if read_only:
-                return HUMAN, f"'{role.name}' 역할의 목록 밖 명령 (사람 확인 — A 로 세션 동안 허용 가능)"
+                return HUMAN, f"'{role.name}' 역할의 목록 밖 명령 (사람 확인 — 승인 창에서 세션 허용 가능)"
             return self._architect_or_human(role, "목록에 없는 명령")
 
         if req.kind == "tool":

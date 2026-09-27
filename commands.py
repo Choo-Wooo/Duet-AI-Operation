@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shlex
 
-from .core.config import PERMISSION_PROFILES, SUPPORTED_CLIS, Role
+from .core.config import PERMISSION_PROFILES, SUPPORTED_CLIS, Role, validate_role_name
 from .core.orchestrator import Orchestrator
 from .core.saves import format_saves
 
@@ -127,6 +127,10 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
                 return "사용법: /role add <이름> <claude|codex|agy> <모델> <설명…>"
             if parts[0] in orch.cfg.roles:
                 return f"'{parts[0]}' 역할이 이미 있습니다."
+            try:
+                validate_role_name(parts[0])
+            except ValueError as e:
+                return str(e)
             orch.add_role(Role(parts[0], parts[1], parts[2] if len(parts) > 2 else None,
                                parts[3] if len(parts) > 3 else "", "workspace_write"))
             return None

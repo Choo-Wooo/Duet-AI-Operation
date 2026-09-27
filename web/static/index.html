@@ -141,6 +141,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
     <nav id="nav">
       <button data-v="live" class="on">진행 <span></span></button>
       <button data-v="work">작업 보드 <span class="badge" id="workBadge" hidden></span></button>
+      <button data-v="docs">문서</button>
       <button data-v="ask">질문</button>
       <button data-v="sessions">세션</button>
       <button data-v="roles">역할·모델</button>
@@ -165,6 +166,10 @@ td button { white-space: nowrap; margin-bottom: 4px; }
         </div>
       </section>
 
+      <section class="view" id="v-docs">
+        <div class="colhead"><input id="docFilter" placeholder="문서 경로 필터"><button id="docRefresh">새로고침</button><span id="docPath"></span></div>
+        <div class="docs-layout"><aside id="docList"></aside><article id="docBody">문서를 선택하세요.</article></div>
+      </section>
       <section class="view" id="v-work">
         <div class="board" id="board"></div>
       </section>
@@ -233,12 +238,51 @@ td button { white-space: nowrap; margin-bottom: 4px; }
   <div class="content"><pre id="modalBody"></pre></div></div></div>
 <div class="toast" id="toast"></div>
 
+<style>
+.docs-layout { display:grid;grid-template-columns:minmax(160px,26%) 1fr;height:calc(100% - 50px); }
+#docList,#docBody { overflow:auto;padding:16px;overflow-wrap:anywhere; }
+#docList button { display:block;text-align:left;width:100%;margin:3px 0; }
+#docBody pre { overflow:auto;padding:12px;background:var(--bg);white-space:pre; }
+#docBody blockquote { border-left:3px solid #888;padding-left:12px; }
+.activity-purple { color:#bb9af7; }.activity-red { color:#f7768e; }.activity-yellow { color:#e0af68; }.activity-green { color:#9ece6a; }.activity-muted { color:#999; }
+#activityRoles { display:flex;flex-wrap:wrap;gap:8px;padding:6px; }
+</style>
+<script src="/static/md.js"></script>
+<script src="/static/activity.js"></script>
 <script>
 (() => {
 const $ = s => document.querySelector(s);
 const token = new URLSearchParams(location.search).get("t") || "";
 if (token) history.replaceState(null, "", "/");
 let ws, S = null, rid = 0;
+let activityNow = DuetActivity.clock(Date.now()/1000, performance.now()/1000);
+const activityRoles=document.createElement('div');activityRoles.id='activityRoles';$('#v-live').prepend(activityRoles);
+const docViewer=renderMarkdown.createViewer({
+  fetch:async url=>{const res=await fetch(url+(url.includes('?')?'&':'?')+'t='+encodeURIComponent(token));if(!res.ok)throw new Error('문서를 열 수 없습니다 ('+res.status+')');return res.json();},
+  setInterval:(f,ms)=>setInterval(f,ms),clearInterval:id=>clearInterval(id),
+  onList:rows=>{const box=$('#docList');box.replaceChildren();let previous='';for(const row of rows){
+    const group=row.path==='DIALOGUE.md'?'대화':row.path.startsWith('docs/')?'docs':row.path.startsWith('.duet/memory/')?'작업 기억':'기타';
+    if(group!==previous){const h=document.createElement('h4');h.textContent=group;box.append(h);previous=group;}
+    const b=document.createElement('button');b.textContent=row.path;b.onclick=()=>docViewer.select(row.path);box.append(b);
+  }},
+  onDocument:doc=>{$('#docPath').textContent=doc.path;$('#docBody').innerHTML=renderMarkdown(doc.content);},
+  onError:e=>{$('#docBody').textContent=e.message;}
+});
+$('#docFilter').oninput=e=>docViewer.filter(e.target.value);
+$('#docRefresh').onclick=()=>docViewer.refresh(true);
+$('#docBody').onclick=e=>{const a=e.target.closest('a');if(!a)return;const href=a.getAttribute('href');const path=docViewer.relative(href);if(path){e.preventDefault();docViewer.select(path);}else if(!/^https?:\/\//i.test(href)){e.preventDefault();}};
+
+function activityBadge(a) {const d=DuetActivity.describe(a,activityNow(performance.now()/1000));return `<span class="activity-${d.color}">${esc(d.text)}</span>`;}
+function drawActivity() {
+  if(!S)return;
+  const entries=Object.entries(S.status.activity||{});
+  activityRoles.innerHTML=entries.map(([n,a])=>`<span>${esc(n)}: ${activityBadge(a)}</span>`).join('');
+  const active=entries.filter(([n,a])=>!['idle','done'].includes(a.state));
+  if(active.length)$('#runtxt').innerHTML=active.map(([n,a])=>`${esc(n)}: ${activityBadge(a)}`).join(' · ');
+  else $('#runtxt').textContent=S.status.paused?'일시정지':'사람 차례';
+  renderBoard(S.status.work||[]);
+}
+setInterval(drawActivity,1000);
 const colors = ["#7aa2f7", "#9ece6a", "#e0af68", "#bb9af7", "#7dcfff", "#f7768e", "#73daca", "#ff9e64"];
 const roleColor = {};
 const colorOf = r => { const k = (r || "duet").split("#")[0]; if (!roleColor[k]) roleColor[k] = colors[Object.keys(roleColor).length % colors.length]; return roleColor[k]; };
@@ -292,6 +336,7 @@ function setState(st) {
 
 function renderStatus(s) {
   if (!S) return; S.status = s;
+  activityNow=DuetActivity.clock(s.server_now == null ? Date.now()/1000 : s.server_now,performance.now()/1000);
   const run = s.running || (s.busy ? "진행 중" : null);
   $("#rundot").className = "dot" + (s.paused ? " pause" : run ? " run" : "");
   const working = (s.work || []).filter(w => !["merged", "failed", "cancelled"].includes(w.status) && !w.status.startsWith("waiting") && w.status !== "queued").length;
@@ -307,6 +352,7 @@ function renderStatus(s) {
   $("#ctx").innerHTML = ctx ? "<div style='margin-bottom:4px'>컨텍스트</div>" + ctx : "";
   renderBoard(s.work || []);
   renderTargets();
+  drawActivity();
 }
 
 function renderTargets() {
@@ -416,6 +462,7 @@ function renderBoard(items) {
     const cls = w.status.split(":")[0];
     return `<div class="card wc"><div style="display:flex;gap:8px;align-items:center"><span class="id">${esc(w.id)}</span>
       <span class="pill" style="color:${colorOf(w.role)}">${esc(w.role)}</span><span class="pill ${cls}">${esc(w.status)}</span></div>
+      ${(S.status.work_sessions||[]).filter(x=>x.id===w.id).map(x=>`<div>${esc(x.role)}: ${activityBadge(x)}</div>`).join('')}
       <div style="margin-top:6px">${esc(short(w.task, 220))}</div>
       ${w.depends_on.length ? `<div class="help">의존: ${w.depends_on.map(esc).join(", ")}</div>` : ""}
       ${w.agreed_files.length ? `<div class="help mono">${w.agreed_files.map(esc).join(" · ")}</div>` : ""}
@@ -515,6 +562,7 @@ document.querySelectorAll("#nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("#nav button").forEach(x => x.classList.toggle("on", x === b));
   document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.id === "v-" + b.dataset.v));
   $("#composer").style.display = ["live", "work"].includes(b.dataset.v) ? "" : "none";
+  docViewer.setOpen(b.dataset.v==='docs');
 });
 function sendInput() {
   const t = $("#input").value.trim(); if (!t) return;

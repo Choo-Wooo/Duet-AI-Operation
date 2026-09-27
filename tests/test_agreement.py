@@ -226,15 +226,16 @@ def test_T3_full_run_and_fixed_agreement(orch):
 
 @pytest.mark.parametrize("plan", [PLAN.replace("test_command:", "not_a_command:"),
                                   PLAN.replace("```files", "```text")])
-def test_T3_missing_fields_reject_agree(orch, plan):
+def test_T3_missing_fields_rejected_at_submit(orch, plan):
     async def scenario():
         await start(orch)
-        await submit_plan(orch, plan)
-        response = await advance(orch, "architect", "<!-- duet: AGREE v1 -->")
-        assert response[1] == "system"
-        assert orch.cfg.state.task["phase"] == "plan_review"
+        before = copy.deepcopy(orch.cfg.state.task)
+        response = await submit_plan(orch, plan)
+        assert response[0] == "implementer"
+        assert orch.cfg.state.task["phase"] == "plan"
+        assert orch.cfg.state.task["submitted_version"] == before["submitted_version"]
         assert orch.cfg.state.task["agreed_version"] is None
-        assert any("AGREE 거부" in e.data.get("text", "") for e in orch.events)
+        assert '```files' in response[2] and 'test_command:' in response[2]
 
     asyncio.run(scenario())
 
@@ -425,12 +426,13 @@ def test_T6_policy_cache_and_exact_verify_command(orch):
     assert exact.cache_key() not in policy.session_allow
     # 합의 명령과 다른 실행은 막지 않고 사람 확인으로 넘긴다(세션 허용으로도 건너뛰지 않음)
     for cmd in (task["test_command"] + " -x", "python -m pytest -q", "X=1 " + task["test_command"],
-                task["test_command"] + "; touch x", task["test_command"] + " > out.txt"):
+                task["test_command"] + "; touch x", task["test_command"] + " > out.txt",
+                "bash -lc '" + task["test_command"] + "'"):
         req = ApprovalRequest("architect", "command", "test", command=cmd)
         policy.session_allow.add(req.cache_key())
         assert policy.classify(req, main)[0] == HUMAN
-    # 합의 명령 그대로(셸 래핑 포함)와 출력 줄이기는 자동
-    for cmd in ("bash -lc '" + task["test_command"] + "'", task["test_command"] + " 2>&1 | tail -20"):
+    # 합의 명령 그대로와 안전한 출력 줄이기는 자동
+    for cmd in (task["test_command"], task["test_command"] + " 2>&1 | tail -20"):
         assert policy.classify(ApprovalRequest("architect", "command", "test", command=cmd), main)[0] == AUTO
     assert policy.classify(ApprovalRequest("architect", "command", "read", command="cat src.py"), main)[0] == AUTO
 

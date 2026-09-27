@@ -20,7 +20,7 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from .. import commands
-from ..core.config import PERMISSION_PROFILES, SUPPORTED_CLIS, Config, Role
+from ..core.config import PERMISSION_PROFILES, SUPPORTED_CLIS, Config, Role, validate_role_name
 from ..core.events import Event, EventBus
 from ..core.models import read_cache, refresh
 from ..core.orchestrator import Orchestrator
@@ -277,10 +277,12 @@ class WebUI:
         return {"type": "output", "text": out, "state": self.state()}
 
     def _role_add(self, msg: dict) -> dict:
-        name = str(msg.get("name") or "").strip()
+        name = str(msg.get("name") or "")
         cli = str(msg.get("cli") or "")
-        if not name or not name.replace("_", "").replace("-", "").isalnum() or "#" in name:
-            return {"type": "output", "text": "역할 이름은 영문·숫자·-·_ 만 씁니다."}
+        try:
+            validate_role_name(name)
+        except ValueError as e:
+            return {"type": "output", "status": 400, "text": str(e), "error": str(e)}
         if name in self.cfg.roles:
             return {"type": "output", "text": f"'{name}' 역할이 이미 있습니다."}
         if cli not in SUPPORTED_CLIS:
@@ -390,6 +392,62 @@ def _has(cli: str) -> bool:
 
 
 # ---------------------------------------------------------------- aiohttp 앱
+DOC_LIMIT = 1024 * 1024
+
+
+def _doc_visible(parts: tuple[str, ...]) -> bool:
+    if not parts or any(p in ('..', '.', '') for p in parts):
+        return False
+    directories = parts[:-1]
+    if parts[0] == '.duet':
+        if len(parts) < 3 or parts[1] != 'memory':
+            return False
+        directories = parts[2:-1]
+    return not any(p.startswith('.') or p in ('node_modules', 'duet') for p in directories)
+
+
+def _doc_path(root: Path, raw: str) -> Path:
+    path = Path(raw)
+    if not raw or path.is_absolute() or not _doc_visible(tuple(raw.split('/'))) or path.suffix != '.md':
+        raise ValueError('허용되지 않는 문서 경로')
+    parent = root
+    for part in path.parts[:-1]:
+        parent = parent / part
+        if parent.is_symlink():
+            raise ValueError('심볼릭 링크 디렉터리는 문서 목록에서 제외됩니다')
+    target = (root / path).resolve()
+    if not target.is_relative_to(root.resolve()):
+        raise ValueError('프로젝트 밖의 문서')
+    relative = target.relative_to(root.resolve())
+    if not _doc_visible(relative.parts) or relative.suffix != '.md':
+        raise ValueError('제외된 문서')
+    if not target.is_file():
+        raise FileNotFoundError(raw)
+    if target.stat().st_size > DOC_LIMIT:
+        raise ValueError('문서 크기는 1MiB 이하이어야 합니다')
+    return target
+
+
+def _docs(root: Path) -> list[dict]:
+    import heapq
+    rows = []
+    for base, dirs, files in os.walk(root, followlinks=False):
+        rel = Path(base).relative_to(root)
+        dirs[:] = [d for d in dirs if not (Path(base)/d).is_symlink() and
+                   (_doc_visible((rel/d/'file.md').parts) or (rel == Path('.') and d == '.duet'))]
+        for name in files:
+            raw = (rel/name).as_posix()
+            try:
+                path = _doc_path(root, raw)
+                stat = path.stat()
+            except (OSError, ValueError, RuntimeError):
+                continue
+            row = (stat.st_mtime, raw, stat.st_size)
+            if len(rows) < 2000: heapq.heappush(rows, row)
+            elif row > rows[0]: heapq.heapreplace(rows, row)
+    return [dict(path=p, size=s, mtime=m) for m, p, s in sorted(rows, reverse=True)]
+
+
 def build_app(ui: WebUI) -> web.Application:
     @web.middleware
     async def auth(request: web.Request, handler):
@@ -411,6 +469,28 @@ def build_app(ui: WebUI) -> web.Application:
 
     async def api_state(request: web.Request) -> web.Response:
         return web.json_response(ui.state(), dumps=lambda o: json.dumps(o, ensure_ascii=False, default=str))
+
+    async def api_docs(request: web.Request) -> web.Response:
+        origin = request.headers.get('Origin')
+        if origin and origin.split('://', 1)[-1] != request.host:
+            return web.Response(status=403, text='origin')
+        if request.path == '/api/docs':
+            return web.json_response(await asyncio.to_thread(_docs, ui.cfg.project))
+        raw = request.query.get('path', '')
+        def read():
+            path = _doc_path(ui.cfg.project, raw)
+            with path.open('rb') as f:
+                content = f.read(DOC_LIMIT + 1)
+                mtime = os.fstat(f.fileno()).st_mtime
+            if len(content) > DOC_LIMIT:
+                raise ValueError('문서 크기 초과')
+            return dict(path=raw, content=content.decode('utf-8'), mtime=mtime)
+        try:
+            return web.json_response(await asyncio.to_thread(read))
+        except FileNotFoundError:
+            return web.json_response({'error': '문서가 없습니다'}, status=404)
+        except (ValueError, OSError, RuntimeError) as e:
+            return web.json_response({'error': str(e)}, status=400)
 
     async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         origin = request.headers.get("Origin")
@@ -443,6 +523,8 @@ def build_app(ui: WebUI) -> web.Application:
 
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
+    app.router.add_get('/api/docs', api_docs)
+    app.router.add_get('/api/doc', api_docs)
     app.router.add_get("/ws", ws_handler)
     app.router.add_static("/static/", STATIC)
     return app

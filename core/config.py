@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -10,6 +11,12 @@ from typing import Any
 import yaml
 
 from .agreement import EXCLUDED_DIRS, EXCLUDED_FILES, validate_task
+from .storage import atomic_write, load_json
+
+
+def validate_role_name(name: str) -> None:
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9가-힣_-]{1,32}', name):
+        raise ValueError(f'잘못된 역할 이름 {name!r}: 영문·숫자·한글·_·- 1~32자여야 합니다')
 
 SUPPORTED_CLIS = ("claude", "codex", "agy")
 PERMISSION_PROFILES = ("read_only", "workspace_write")
@@ -76,6 +83,7 @@ DEFAULT_MODES = {
 }
 
 DEFAULT_POLICY = {
+    "human_approval_timeout_sec": 3600,
     # 모든 역할에 대해 자동 허용되는 명령 (정규식, 각 하위 명령마다 검사)
     "auto_commands": [
         r"^(ls|pwd|cat|head|tail|wc|echo|printf|grep|rg|find|tree|which|diff|stat|file|du|sort|uniq|cut|true)\b",
@@ -103,7 +111,8 @@ DEFAULT_POLICY = {
         r"(^|\s)(~|/etc|/usr|/System|/Library)(/|\s|$)",
     ],
     # 보호 경로: 쓰기 시 사람 확인 (glob, 프로젝트 기준)
-    "protected_paths": [".env", ".env.*", "**/.env", "**/*.pem", "**/*.key", ".git/**", "**/secrets/**", ".duet/**"],
+    "protected_paths": [".env", ".env.*", "**/.env", "**/.env.*", "**/*.pem", "**/*.key",
+                        ".git/**", "**/secrets/**", ".duet/**", ".claude/**", ".agents/**"],
     # read_only 역할이 쓸 수 있는 경로
     "readonly_writable": ["DIALOGUE.md", "docs/**", "docs/*"],
     # 설계자 심사 설정
@@ -149,6 +158,7 @@ class Config:
         self.modes: dict[str, Mode] = dict(DEFAULT_MODES)
         self.policy: dict = dict(DEFAULT_POLICY)
         self.state = State()
+        self.load_warnings: list[str] = []
         self.settings: dict = {"checkpoint_every": 50, "git_snapshots": True,
                                "plan_rounds": 3, "plan_approval": "architect",
                                "fingerprint_exclude": sorted(EXCLUDED_DIRS | EXCLUDED_FILES),
@@ -223,12 +233,10 @@ class Config:
                 )
         if self.policy_file.exists():
             self.policy.update(yaml.safe_load(self.policy_file.read_text(encoding="utf-8")) or {})
-        if self.state_file.exists():
-            try:
-                raw = json.loads(self.state_file.read_text(encoding="utf-8"))
-                self.state = State(**{k: v for k, v in raw.items() if k in State.__dataclass_fields__})
-            except Exception:
-                self.state = State()
+        for name in self.roles:
+            validate_role_name(name)
+        raw = load_json(self.state_file, self.load_warnings.append)
+        self.state = State(**{k: v for k, v in raw.items() if k in State.__dataclass_fields__}) if raw is not None else State()
         validate_task(self.state.task)
         if self.state.mode not in self.modes:
             self.state.mode = "review"
@@ -260,7 +268,7 @@ class Config:
                    "# 권한 정책. auto_commands=자동 허용, human_commands=사람 확인, 그 외는 설계자 판단.")
 
     def save_state(self) -> None:
-        self.state_file.write_text(json.dumps(asdict(self.state), ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write(self.state_file, json.dumps(asdict(self.state), ensure_ascii=False, indent=2))
 
     # ---------- 편의 ----------
     @property

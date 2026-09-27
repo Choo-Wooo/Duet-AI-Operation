@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import inspect
 from collections import deque
 
@@ -20,7 +21,7 @@ from claude_agent_sdk import (
 )
 
 from ..core.clis import which
-from ..core.policy import ApprovalRequest
+from ..core.policy import ApprovalRequest, Decision
 from ..core.policy import PLAN_DENY_TEXT, PLAN_TOOLS, NETWORK_TOOLS, read_only_command, tool_matches
 from ..core.prompts import REVIEW_SYSTEM
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
@@ -66,6 +67,15 @@ def _result_text(content) -> str:
 
 class ClaudeAdapter(AgentAdapter):
     client: ClaudeSDKClient | None = None
+    approval_timeout = 3600.0
+
+    async def _bounded_approve(self, req):
+        try:
+            return await asyncio.wait_for(self.approve(req), self.approval_timeout)
+        except asyncio.TimeoutError:
+            reason = '사람 승인 대기 중 타임아웃'
+            self.emit('notice', text=reason, level='warn')
+            return Decision(False, reason, by='timeout')
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
         append = REVIEW_SYSTEM if self.reviewer else self.system_append
@@ -77,7 +87,7 @@ class ClaudeAdapter(AgentAdapter):
             can_use_tool=self._can_use_tool,
             resume=resume,
             stderr=self._on_stderr,
-            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use])]},
+            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=self.approval_timeout + 30)]},
         )
         if resume and self.fork_session:
             if "fork_session" in inspect.signature(ClaudeAgentOptions).parameters:
@@ -129,7 +139,7 @@ class ClaudeAdapter(AgentAdapter):
         else:
             req = ApprovalRequest(self.role.name, "tool", _tool_detail(tool_name, tool_input), tool=tool_name,
                                   detail={"input": tool_input})
-        decision = await self.approve(req)
+        decision = await self._bounded_approve(req)
         if decision.allow:
             return PermissionResultAllow(updated_input=tool_input)
         return PermissionResultDeny(message=decision.reason or "거부됨", interrupt=decision.interrupt)
@@ -143,12 +153,12 @@ class ClaudeAdapter(AgentAdapter):
         if self.plan_read_only and name not in NETWORK_TOOLS:
             allow, reason = False, PLAN_DENY_TEXT
         elif self.plan_read_only and name in NETWORK_TOOLS:
-            decision = await self.approve(ApprovalRequest(self.role.name, "tool", _tool_detail(name, inp),
+            decision = await self._bounded_approve(ApprovalRequest(self.role.name, "tool", _tool_detail(name, inp),
                                                          tool=name, detail={"input": inp}))
             allow, reason = decision.allow, decision.reason
         elif self.verification_command is not None and name == "Bash":
             cmd = str(inp.get("command", ""))
-            decision = await self.approve(ApprovalRequest(self.role.name, "command", "$ " + cmd,
+            decision = await self._bounded_approve(ApprovalRequest(self.role.name, "command", "$ " + cmd,
                                                          command=cmd, tool=name))
             allow, reason = decision.allow, decision.reason
         else:

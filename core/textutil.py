@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from .storage import atomic_write
 
 MEMORY_RE = re.compile(r"```duet-memory[ \t]*\n(?P<body>.*?)\n```[ \t]*", re.S)
 MEMORY_MAX_CHARS = 12000
@@ -29,11 +30,33 @@ def extract_memory(text: str | None) -> tuple[str | None, str | None]:
     """응답에서 마지막 ```duet-memory 블록을 꺼내고, 블록을 뺀 본문을 돌려준다."""
     if not text:
         return text, None
-    found = list(MEMORY_RE.finditer(text))
+    found = []
+    stack = []
+    outer = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r'^[ \t]*(`{3,}|~{3,})([^\r\n]*)', line)
+        if marker:
+            run, label = marker.groups()
+            label = label.strip()
+            if not stack:
+                stack.append(run)
+                outer = (offset, offset + len(line)) if label == 'duet-memory' else None
+            elif run[0] == stack[-1][0] and len(run) >= len(stack[-1]) and not label:
+                stack.pop()
+                if not stack and outer is not None:
+                    found.append((outer[0], offset + len(line), text[outer[1]:offset].strip()))
+                    outer = None
+            elif outer is not None and (label or run[0] != stack[-1][0]):
+                stack.append(run)
+        offset += len(line)
     if not found:
         return text, None
-    body = found[-1].group("body").strip()
-    clean = MEMORY_RE.sub("", text).rstrip()
+    body = found[-1][2]
+    clean = text
+    for start, end, _ in reversed(found):
+        clean = clean[:start] + clean[end:]
+    clean = clean.rstrip()
     return clean, body or None
 
 
@@ -47,6 +70,5 @@ def save_memory(project: Path, role: str, body: str) -> Path:
     if len(body) > MEMORY_MAX_CHARS:
         body = body[:MEMORY_MAX_CHARS] + "\n… (길이 제한으로 잘림 — 다음 갱신 때 더 짧게 정리할 것)"
     stamp = time.strftime("%Y-%m-%d %H:%M")
-    path.write_text(f"<!-- {role} 작업 기억 · 갱신 {stamp} · duet 이 매 턴 응답에서 자동 저장 -->\n{body}\n",
-                    encoding="utf-8")
+    atomic_write(path, f"<!-- {role} 작업 기억 · 갱신 {stamp} · duet 이 매 턴 응답에서 자동 저장 -->\n{body}\n")
     return path

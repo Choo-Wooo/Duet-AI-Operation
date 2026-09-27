@@ -199,6 +199,7 @@ class AgyAdapter(AgentAdapter):
         partial: dict[int, list[str]] = {}
         self._hook_calls = self._tool_steps = 0
         env = {**os.environ, "DUET_AGY_BRIDGE": self._sock, "DUET_AGY_TOKEN": self._token}
+        err_task = None
         try:
             self.proc = await asyncio.create_subprocess_exec(
                 *self._argv(prompt), cwd=str(self.project), env=env, stdin=asyncio.subprocess.DEVNULL,
@@ -255,11 +256,25 @@ class AgyAdapter(AgentAdapter):
                     self.emit("notice", level="warn",
                               text="agy 가 거부된 동작: " + ", ".join(str(d.get("display_name") or d.get("action"))
                                                                     for d in denied))
+        except asyncio.CancelledError:
+            # Review timeout interrupts first. Reap before losing the process
+            # handle so a delayed response cannot outlive this connection.
+            if self.proc is not None:
+                if self.proc.returncode is None:
+                    try:
+                        os.killpg(self.proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                await self.proc.wait()
+            raise
         except Exception as e:
             result.ok = False
             tail = "\n".join(list(self._stderr)[-5:])
             result.error = f"{type(e).__name__}: {e}" + (f"\n{tail}" if tail else "")
         finally:
+            if err_task is not None:
+                err_task.cancel()
+                await asyncio.gather(err_task, return_exceptions=True)
             self.busy = False
             self.proc = None
         result.text = texts[-1] if texts else ""

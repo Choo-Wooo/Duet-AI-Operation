@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import signal
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -26,6 +28,7 @@ import yaml
 from .agreement import parse_plan
 from .dialogue import extract_directives
 from .policy import ApprovalRequest, Decision, Policy, AUTO, read_only_decision
+from .prompts import BACKGROUND_WAIT
 from .worktrees import GitError, Worktrees, valid_id
 
 if TYPE_CHECKING:
@@ -38,7 +41,7 @@ REPORT_TRIGGER = "\x00duet-work-report"
 MAX_CONSULTS = 6
 MAX_REWORK = 4
 
-WORK_SYSTEM = """
+WORK_SYSTEM = BACKGROUND_WAIT + """
 # duet 병렬 작업 규칙
 당신은 duet 오케스트레이터 안에서 '{role}' 역할로 병렬 작업 `{id}` 하나를 맡은 세션입니다.
 역할: {brief}
@@ -59,7 +62,7 @@ WORK_SYSTEM = """
 테스트↔AC 매핑(모의/실제 구분), `test_command: <한 줄>` (이 워크트리에서 실행), 다른 작업과의 인터페이스, 열린 질문.
 """
 
-ARCH_WORK_SYSTEM = """
+ARCH_WORK_SYSTEM = BACKGROUND_WAIT + """
 # duet 병렬 작업 — 설계자 분신
 당신은 설계자 세션을 복제한 분신으로, 병렬 작업 `{id}` 하나의 계획 검토·검증·질문 응답을 맡습니다.
 작업 워크트리 경로: {worktree} (메인 프로젝트 기준). 파일은 이 경로 아래를 읽으세요. 코드는 고치지 않습니다.
@@ -109,6 +112,8 @@ class WorkItem:
     agreed_files: list[str] = field(default_factory=list)
     test_command: str = ""
     rounds: int = 0
+    negotiations: int = 0
+    negotiation_limit: int = 6
     reworks: int = 0
     consults: int = 0
     session_id: str | None = None
@@ -150,16 +155,29 @@ class WorkBoard:
         self.tasks: dict[str, asyncio.Task] = {}
         self.adapters: dict[str, Any] = {}  # key -> adapter (worker "id", architect "id@arch")
         self.merge_lock = asyncio.Lock()
+        self.git_lock = orch.git.merge_lock
+        self.closing = False
+        self._started = False
         self.wt = Worktrees(self.project) if orch.git.enabled else None
         self.changed = asyncio.Event()
         self._report_pending = False
+        self.load_warnings: list[str] = []
         self._load()
+
+    def start(self) -> None:
+        """Called once at the first async entry, after synchronous construction."""
+        if not self._started and not self.closing:
+            self._started = True
+            self.schedule()
 
     # ---------------- 저장 ----------------
     def _load(self) -> None:
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        from .storage import load_json
+        def warn(text):
+            self.load_warnings.append(text)
+            self.orch.bus.emit('notice', None, text=text, level='warn')
+        raw = load_json(self.path, warn)
+        if raw is None:
             return
         self.base = raw.get("base")
         self.batch = int(raw.get("batch") or 0)
@@ -174,11 +192,12 @@ class WorkBoard:
             self.items[it.id] = it
 
     def save(self) -> None:
+        from .storage import atomic_write
         data = {"base": self.base, "batch": self.batch, "items": [asdict(i) for i in self.items.values()]}
         try:
-            self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+            atomic_write(self.path, json.dumps(data, ensure_ascii=False, indent=2))
+        except OSError as e:
+            self.orch.bus.emit('notice', None, text=f'work.json 저장 실패: {e}', level='warn')
 
     def _touch(self, it: WorkItem, status: str | None = None, reason: str = "") -> None:
         if status:
@@ -195,7 +214,8 @@ class WorkBoard:
 
     # ---------------- 조회 ----------------
     def active(self) -> bool:
-        return any(i.status in ACTIVE or i.status.startswith("waiting") for i in self.items.values())
+        return any(i.status in ACTIVE or i.status == "blocked" or i.status.startswith("waiting")
+                   for i in self.items.values())
 
     def busy(self) -> bool:
         return bool(self.tasks) or any(i.status in ACTIVE for i in self.items.values())
@@ -341,6 +361,8 @@ class WorkBoard:
         if not it or not it.status.startswith("waiting"):
             return f"재개할 대기 작업 '{wid}' 가 없습니다."
         phase = it.status.split(":", 1)[1] if ":" in it.status else "plan"
+        if it.negotiations >= it.negotiation_limit:
+            it.negotiation_limit += 6
         it.resume_at = phase if phase in ("verify", "merging") and it.agreed_files else ""
         self._touch(it, "queued")
         self.schedule()
@@ -359,15 +381,34 @@ class WorkBoard:
 
     # ---------------- 스케줄 ----------------
     def schedule(self) -> None:
+        if self.closing:
+            return
+        # Compute dependency blockage independent of insertion order, including chains.
+        blocked = {i.id for i in self.items.values()
+                   if i.status in ("failed", "cancelled") or i.status.startswith("waiting")}
+        while True:
+            more = {i.id for i in self.items.values() if i.status in ("queued", "blocked")
+                    and any(d not in self.items or d in blocked for d in i.depends_on)}
+            if more <= blocked:
+                break
+            blocked.update(more)
+        for it in self.items.values():
+            if it.status not in ("queued", "blocked"):
+                continue
+            if it.id in blocked:
+                reason = "선행 작업 차단: " + ", ".join(
+                    f"{d} ({'missing' if d not in self.items else 'blocked' if self.items[d].status == 'queued' else self.items[d].status})"
+                    for d in it.depends_on if d not in self.items or d in blocked)
+                if it.status != "blocked" or it.wait_reason != reason:
+                    self._touch(it, "blocked", reason)
+            elif it.status == "blocked":
+                self._touch(it, "queued")
         cap = int(self.cfg.settings.get("max_parallel") or 4)
         running = [i for i in self.items.values() if i.id in self.tasks]
         for it in sorted(self.items.values(), key=lambda x: x.created):
             if it.status != "queued" or it.id in self.tasks:
                 continue
             deps = [self.items.get(d) for d in it.depends_on]
-            if any(d is None or d.status in ("failed", "cancelled") for d in deps):
-                self._touch(it, "waiting:queued", "선행 작업이 실패·취소됨: " + ", ".join(it.depends_on))
-                continue
             if any(d.status != "merged" for d in deps if d):
                 continue
             role = self.cfg.roles.get(it.role)
@@ -389,7 +430,7 @@ class WorkBoard:
         if live:
             return
         unreported = [i for i in self.items.values() if not getattr(i, "_reported", False)
-                      and (i.status in DONE or i.status.startswith("waiting"))]
+                      and (i.status in DONE or i.status == "blocked" or i.status.startswith("waiting"))]
         if not unreported:
             return
         for i in unreported:
@@ -431,7 +472,8 @@ class WorkBoard:
         ad = make_adapter(role, path, self.orch.bus, lambda req: self._approve(it, pol, req), it.session_id,
                           system, fake=self.orch.fake)
         ad.context_limit = self.orch.context_limit(it.role)
-        await ad.start()
+        ad.approval_timeout = float(self.cfg.policy.get('human_approval_timeout_sec', 3600))
+        await self._start_activity(ad)
         self.adapters[it.id] = ad
         return ad
 
@@ -447,9 +489,22 @@ class WorkBoard:
         system = ARCH_WORK_SYSTEM.format(id=it.id, worktree=path.relative_to(self.project).as_posix())
         ad = make_adapter(role, self.project, self.orch.bus, self.orch.handle_approval, base_session, system,
                           fake=self.orch.fake, fork_session=bool(base_session) and not it.arch_session_id)
-        await ad.start()
+        await self._start_activity(ad)
         self.adapters[key] = ad
         return ad
+
+    async def _start_activity(self, ad):
+        if '#' in ad.label:
+            base, ident = ad.label.split('#', 1)
+            self.orch.work_sessions[ad.label] = dict(id=ident.split('(', 1)[0], role=base,
+                session=ad.label, phase='starting', started_at=time.time())
+        self.orch.set_activity(ad.label, 'starting', start=True)
+        try:
+            await ad.start()
+        except BaseException as e:
+            self.orch.work_sessions.pop(ad.label, None)
+            self.orch.set_activity(ad.label, 'error', str(e))
+            raise
 
     async def _approve(self, it: WorkItem, pol: Policy, req: ApprovalRequest) -> Decision:
         phase = it.status if it.status in ("plan", "plan_review") else "implement"
@@ -464,6 +519,9 @@ class WorkBoard:
                     await ad.close()
                 except Exception:
                     pass
+                self.orch.work_sessions.pop(ad.label, None)
+                if self.orch.activity.get(ad.label, {}).get('state') not in ('done', 'error', 'idle'):
+                    self.orch.set_activity(ad.label, 'idle')
 
     async def _turn(self, ad, it: WorkItem, kind: str, prompt: str, who: str):
         await self.orch.not_paused.wait()
@@ -472,7 +530,12 @@ class WorkBoard:
             prompt += "\n\n이 작업에 온 메시지 (사람·설계자):\n" + "\n".join(f"- {m}" for m in it.inbox)
             it.inbox.clear()
         self.orch.bus.emit("turn_start", ad.label, n=0, kind=kind, info=it.id)
-        tr = await ad.run_turn(prompt)
+        try:
+            tr = await ad.run_turn(prompt)
+        except BaseException as e:
+            self.orch.bus.emit('turn_end', ad.label, ok=False, error=str(e),
+                               interrupted=isinstance(e, asyncio.CancelledError))
+            raise
         self.orch.bus.emit("turn_end", ad.label, n=0, summary=(tr.text or "")[:200], directives=[], ok=tr.ok,
                            error=tr.error, interrupted=tr.interrupted)
         full = tr.full_text if tr.full_text is not None else tr.text
@@ -521,6 +584,11 @@ class WorkBoard:
         limit = int(self.cfg.settings.get("plan_rounds") or 3)
         feedback = ""
         while True:
+            # One submission (valid or invalid) plus its review is one negotiation.
+            if it.negotiations >= it.negotiation_limit:
+                self.orch.bus.emit('ask', it.role, text=f'{it.id}: 협상 6회 한도 — 사람 응답/RESUME_WORK 필요')
+                raise _Wait('plan', '협상 6회 한도 — 사람 응답/RESUME_WORK 필요')
+            it.negotiations += 1
             self._touch(it, "plan")
             worker = await self._worker(it, path)
             worker.plan_read_only = True
@@ -633,11 +701,22 @@ class WorkBoard:
                 it.reworks = 0
 
     async def _run_test(self, it: WorkItem, path: Path, command: str) -> tuple[int, str]:
+        label = f'duet#{it.id}'
+        self.orch.bus.emit('turn_start', label, kind='work_test', info=it.id)
+        try:
+            result = await self._run_test_active(it, path, command)
+        except BaseException as e:
+            self.orch.bus.emit('turn_end', label, ok=False, error=str(e), interrupted=isinstance(e, asyncio.CancelledError))
+            raise
+        self.orch.bus.emit('turn_end', label, ok=result[0] == 0, error='' if result[0] == 0 else result[1][:80])
+        return result
+
+    async def _run_test_active(self, it: WorkItem, path: Path, command: str) -> tuple[int, str]:
         req = ApprovalRequest(self.cfg.main, "command", "$ " + command, command=command)
         pol = Policy(path, self.cfg.policy, self.cfg.main)
         tier, reason = pol.classify(req, self.cfg.main_role())
         if tier != AUTO:
-            d = await self.orch._ask_human(req, f"[{it.id}] 합의 테스트 실행: {reason}", None)
+            d = await self.orch._ask_human(replace(req, role=f'duet#{it.id}'), f"[{it.id}] 합의 테스트 실행: {reason}", None)
             if not d.allow:
                 return 126, f"사람이 테스트 실행을 거부: {d.reason}"
         timeout = float(self.cfg.settings.get("work_test_timeout") or 900)
@@ -647,11 +726,22 @@ class WorkBoard:
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            await self._kill_test_group(proc)
             return 124, f"시간 초과 ({timeout:.0f}초)"
+        except asyncio.CancelledError:
+            await self._kill_test_group(proc)
+            raise
         text = out.decode(errors="replace")
         self.orch.bus.emit("tool_output", f"duet#{it.id}", text=text[-800:], ok=proc.returncode == 0)
         return proc.returncode or 0, text[-4000:]
+
+    @staticmethod
+    async def _kill_test_group(proc) -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
 
     async def _verify(self, it: WorkItem, path: Path, report: str) -> str | None:
         """합의 테스트를 실행하고 설계자 분신이 검토. 재작업 사유(통과면 None)."""
@@ -701,10 +791,8 @@ class WorkBoard:
                                                   [("merge", "병합"), ("hold", "보류")])
                 if c != "merge":
                     raise _Wait("merging", "사람이 병합을 보류함")
-            self.orch.git.snapshot(f"duet: {it.id} 병합 전 스냅샷")
             try:
-                sha = await asyncio.to_thread(self.wt.squash_into_base, it.id, self.base,
-                                              f"{it.task.splitlines()[0][:72]}\n\nduet work {it.id} ({it.role})")
+                sha = await asyncio.to_thread(self._snapshot_and_squash, it)
             except GitError as e:
                 raise _Wait("merging", f"기준 브랜치 병합 실패: {e}")
             it.merged_commit = sha
@@ -716,6 +804,12 @@ class WorkBoard:
             self.orch.dialogue.append_note(f"[work] {it.id} ({it.role}) → {self.base} 병합"
                                            + (f" {sha[:9]}" if sha else ""))
             return True
+
+    def _snapshot_and_squash(self, it: WorkItem) -> str | None:
+        with self.git_lock:
+            self.orch.git._snapshot_locked(f"duet: {it.id} 병합 전 스냅샷")
+            return self.wt.squash_into_base(it.id, self.base,
+                                           f"{it.task.splitlines()[0][:72]}\n\nduet work {it.id} ({it.role})")
 
     # ---------------- 세션 간 협의 ----------------
     async def _consultable(self, ad, it: WorkItem, kind: str, prompt: str, path: Path):
@@ -751,7 +845,7 @@ class WorkBoard:
                 o.id for o in self.items.values() if o.id != it.id and o.status not in DONE)
         src = self.adapters.get(other.id)
         session = (src.session_id if src else None) or other.session_id
-        role = replace(self.cfg.roles[other.role], name=f"{other.role}#{other.id}(답변)")
+        role = replace(self.cfg.roles[other.role], name=f"{other.role}#{other.id}(답변:{it.id})")
         opath = self.wt.path_for(other.id)
         if not opath.exists():
             opath = self.project
@@ -760,11 +854,16 @@ class WorkBoard:
                                              branch=f"duet/work/{other.id}", base=self.base),
                           fake=self.orch.fake, fork_session=bool(session))
         try:
-            await ad.start()
+            await self._start_activity(ad)
             ad.plan_read_only = True
             ad.turn_kind = "work_consult"
+            self.orch.bus.emit('turn_start', ad.label, kind='work_consult', info=other.id)
             tr = await ad.run_turn(f"[duet] 병렬 작업 {it.id} ({it.role}) 가 당신의 작업 {other.id} 에 대해 묻습니다 "
                                    f"(읽기 전용 복제본이 답합니다. 파일을 고치지 마세요):\n{question}")
+            self.orch.bus.emit('turn_end', ad.label, ok=tr.ok, error=tr.error, interrupted=tr.interrupted)
+        except BaseException as e:
+            self.orch.bus.emit('turn_end', ad.label, ok=False, error=str(e), interrupted=isinstance(e, asyncio.CancelledError))
+            raise
         finally:
             await ad.close()
         text = tr.full_text or tr.text or tr.error or "(응답 없음)"
@@ -782,6 +881,7 @@ class WorkBoard:
 
     # ---------------- 종료 ----------------
     async def close(self) -> None:
+        self.closing = True
         for t in list(self.tasks.values()):
             t.cancel()
         for t in list(self.tasks.values()):

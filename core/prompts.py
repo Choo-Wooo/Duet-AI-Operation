@@ -5,6 +5,9 @@ from .config import Config, Role
 from .agreement import task_status
 from .textutil import summarize_paths
 
+BACKGROUND_WAIT = ('보조 에이전트를 백그라운드로 띄웠다면 결과를 받기 전에 응답을 끝내지 말 것 — '
+                   '기다리거나 foreground로 실행할 것.\n')
+
 MEMORY_SYSTEM = """
 ## 작업 기억 (긴 세션 유지용)
 대화는 길어지면 압축되거나 새 세션으로 바뀝니다. 그래도 깊은 작업이 이어지도록 작업 기억을 유지합니다.
@@ -40,7 +43,7 @@ AGREEMENT_SYSTEM = """
 DELEGATE → plan → plan_review → implement → verify 순서입니다.
 plan 작업자는 DIALOGUE.md를 포함해 파일을 전혀 쓰지 않습니다. 버전 헤더 없이 계획 전문을
 응답하고 마지막에 PLAN ready를 냅니다. 오케스트레이터가 계획 버전과 대화를 기록합니다.
-계획 필수 항목: 이해한 요구, 설계와 다른 점 및 이유(없으면 없음), files 코드블록(한 줄당 파일),
+계획 필수 항목: 이해한 요구, 설계와 다른 점 및 이유(없으면 없음), ```files 라벨 코드블록(한 줄당 파일),
 AC 수용 기준, 테스트↔AC와 모의/실제 구분, test_command: 한 줄, 열린 질문.
 메인은 PLAN을 검토해 AGREE vN 또는 REVISE 사유를 내며, 구현자는 합의 버전을 지킵니다.
 벗어나야 하면 코드를 멈추고 새 계획 전문과 REPORT deviation 사유를 응답합니다.
@@ -132,13 +135,13 @@ def system_append(cfg: Config, role: Role) -> str:
     if is_main:
         from .work import PARALLEL_SYSTEM
         directives += PARALLEL_SYSTEM.replace("{max_parallel}", str(cfg.settings.get("max_parallel", 4)))
-    return (common + directives + role_guide(role.name) + MEMORY_SYSTEM.replace("{role}", role.name)
+    return (common + BACKGROUND_WAIT + directives + role_guide(role.name) + MEMORY_SYSTEM.replace("{role}", role.name)
             + (AGREEMENT_SYSTEM if cfg.mode.agreement or cfg.state.task else ""))
 
 
 def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: str = "") -> str:
     mode = cfg.mode
-    lines = [f"[duet] 턴 #{n} · 역할 {role.name}"]
+    lines = [f"[duet] 턴 #{n} · 역할 {role.name}", BACKGROUND_WAIT.strip()]
     if role.name == cfg.main:
         lines.append(f"대화 모드: {mode.name} — {mode.style}")
         lines.append("현재 팀:\n" + team_table(cfg))
@@ -170,7 +173,7 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
         if role.name == cfg.main and task["phase"] in ("plan", "implement"):
             lines.append("작업자 진행 상황을 검토해 사람에게 응답하세요. 대기 중이면 RESUME로 같은 단계를 재개하거나 CANCEL 사유로 취소할 수 있습니다.")
         elif task["phase"] == "plan":
-            lines.append("계획 전문을 응답하세요. 필수: 요구 요약, 설계와 다른 점/이유, files 코드블록, "
+            lines.append("계획 전문을 응답하세요. 필수: 요구 요약, 설계와 다른 점/이유, ```files 라벨 코드블록, "
                          "AC, 테스트↔AC 및 모의/실제 구분, test_command: 한 줄, 열린 질문. "
                          "버전 헤더는 쓰지 말고 마지막에 <!-- duet: PLAN ready -->를 쓰세요. 반론도 새 제출입니다.")
         elif task["phase"] == "plan_review":
@@ -209,17 +212,17 @@ DIALOGUE.md 와 docs/ 를 읽어 현재 설계와 작업 맥락을 확인할 수
 
 
 def review_prompt(req_summary: str, role: str, reason: str, task: str) -> str:
-    return (f"[권한 심사] 요청 역할: {role}\n요청: {req_summary}\n분류 사유: {reason}\n"
+    return (BACKGROUND_WAIT + f"[권한 심사] 요청 역할: {role}\n요청: {req_summary}\n분류 사유: {reason}\n"
             f"현재 위임된 작업: {task or '(없음)'}\nJSON 한 줄로만 답하세요.")
 
 
 def opinion_prompt(req_summary: str, role: str, reason: str, task: str) -> str:
-    return (f"[의견 요청] 다음 요청은 위험 등급이라 사람이 최종 결정합니다. 사람에게 줄 의견을 주세요.\n"
+    return (BACKGROUND_WAIT + f"[의견 요청] 다음 요청은 위험 등급이라 사람이 최종 결정합니다. 사람에게 줄 의견을 주세요.\n"
             f"요청 역할: {role}\n요청: {req_summary}\n분류 사유: {reason}\n현재 작업: {task or '(없음)'}\n"
             'JSON 한 줄로만: {"decision": "allow" | "deny", "reason": "한 문장"}')
 
 
-ASK_SYSTEM = """
+ASK_SYSTEM = BACKGROUND_WAIT + """
 # duet 질문 콘솔
 당신은 duet 프로젝트의 '{role}' 역할이 지금까지 쌓은 맥락을 이어받은 분신입니다. 사람이 이 프로젝트에 대해 묻는 질문에
 답합니다. 본 작업 흐름과는 분리된 곁가지 대화이므로:

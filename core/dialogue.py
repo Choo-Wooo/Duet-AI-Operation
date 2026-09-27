@@ -10,11 +10,46 @@ HEADER_RE = re.compile(r"^## \[(?P<role>[^\]\n]+)\] #(?P<n>\d+)(?P<rest>[^\n]*)$
 DIRECTIVE_RE = re.compile(r"<!--\s*duet:\s*(?P<name>[A-Z_]+)\b(?P<arg>.*?)-->", re.S)
 
 
-def control_text(text: str) -> str:
+def _control_matches(text: str):
+    visible = control_text(text)
+    # Skip comments as a unit: inline ```files in a TASK is argument text.
+    spans = []
+    tokens = re.compile(r'<!--.*?-->|`+', re.S)
+    end = 0
+    for token in tokens.finditer(visible):
+        if token.start() < end or token.group().startswith('<!--'):
+            continue
+        rest = visible[token.end():]
+        paragraph_end = re.search(r'\r?\n[ \t\r]*\n', rest)
+        if paragraph_end:
+            rest = rest[:paragraph_end.start()]
+        close = re.search(r'(?<!`)' + re.escape(token.group()) + r'(?!`)', rest)
+        if close:
+            end = token.end() + close.end()
+            spans.append((token.start(), end))
+    for match in DIRECTIVE_RE.finditer(visible):
+        prefix = visible[visible.rfind('\n', 0, match.start()) + 1:match.start()]
+        if prefix.strip() or any(start <= match.start() < end for start, end in spans):
+            continue
+        yield match
+
+
+def control_text(text: str, *, recover_turns: bool = False) -> str:
     """코드 fence/인용을 같은 길이의 공백으로 가려 예제가 실행되지 않게 한다."""
     lines = []
     fence = None
+    last_number = None
     for line in text.splitlines(keepends=True):
+        if recover_turns:
+            header = HEADER_RE.match(line)
+            if header and (fence is None or (last_number is not None
+                                             and int(header['n']) == last_number + 1)):
+                # A sequential turn header is a recovery boundary even when
+                # the previous response was truncated inside a code fence.
+                last_number = int(header['n'])
+                fence = None
+                lines.append(line)
+                continue
         stripped = line.lstrip()
         marker = re.match(r"(`{3,}|~{3,})(.*)", stripped)
         hidden = fence is not None or stripped.startswith(">")
@@ -30,11 +65,11 @@ def control_text(text: str) -> str:
 
 
 def extract_directives(text: str) -> list[tuple[str, str]]:
-    return [(m.group("name"), m.group("arg").strip()) for m in DIRECTIVE_RE.finditer(control_text(text))]
+    return [(m.group("name"), text[m.start('arg'):m.end('arg')].strip()) for m in _control_matches(text)]
 
 
 def without_directives(text: str) -> str:
-    for m in reversed(list(DIRECTIVE_RE.finditer(control_text(text)))):
+    for m in reversed(list(_control_matches(text))):
         text = text[:m.start()] + text[m.end():]
     return text.strip()
 
@@ -87,7 +122,7 @@ class Dialogue:
 
     def turns(self) -> list[Turn]:
         text = self.read()
-        ms = list(HEADER_RE.finditer(text))
+        ms = list(HEADER_RE.finditer(control_text(text, recover_turns=True)))
         out = []
         for i, m in enumerate(ms):
             end = ms[i + 1].start() if i + 1 < len(ms) else len(text)

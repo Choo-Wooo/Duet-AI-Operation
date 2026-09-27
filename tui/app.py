@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import hashlib
+import time
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -20,8 +22,23 @@ from .screens import ApprovalScreen, ChoiceScreen
 PALETTE = ["#7aa2f7", "#9ece6a", "#e0af68", "#bb9af7", "#7dcfff", "#f7768e", "#73daca"]
 
 
+def activity_label(a: dict, now: float) -> tuple[str, str]:
+    state = a.get('state', 'idle')
+    age = max(0, int(now - (a.get('last_event_at') if a.get('last_event_at') is not None else now)))
+    elapsed = max(0, int(now - (a.get('turn_started_at') if a.get('turn_started_at') is not None else now)))
+    if state == 'awaiting_approval': text, color = '승인 대기', 'magenta'
+    elif state in ('idle', 'done', 'error'):
+        text, color = {'idle':'대기','done':'완료','error':'오류'}[state], 'red' if state == 'error' else 'dim'
+    elif age >= 300: text, color = '멈춘 것 같음 — /stop 또는 재시작', 'red'
+    elif age >= 60: text, color = f'응답 대기 중 (마지막 활동 {age}초 전)', 'yellow'
+    else: text, color = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[elapsed % 10] + ' 처리 중', 'green'
+    if state not in ('idle', 'done', 'error'): text += f' · {elapsed}초'
+    if a.get('detail'): text += ' · ' + a['detail']
+    return text, color
+
+
 def _safe_id(name: str) -> str:
-    return "r-" + re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    return "r-" + hashlib.sha256(name.encode('utf-8')).hexdigest()
 
 
 class DuetApp(App):
@@ -48,6 +65,7 @@ class DuetApp(App):
         self.orch = Orchestrator(cfg, bus, self, fake=fake)
         self.role_colors: dict[str, str] = {}
         self.status_data: dict = {}
+        self._status_received = time.monotonic()
         self._mounted = False
 
     # ---------- 화면 ----------
@@ -199,6 +217,7 @@ class DuetApp(App):
             self._sync_tabs(d.get("roles") or [])
         elif k == "status":
             self.status_data = d
+            self._status_received = time.monotonic()
             self._draw_status()
         elif k == "phase":
             dlg.write(Text(f"· {d['task_id']}: {d['from'] or '위임'} → {d['to']}", style="cyan"))
@@ -227,12 +246,28 @@ class DuetApp(App):
 
     def _draw_status(self) -> None:
         s = self.status_data
+        now = s.get('server_now', time.time()) + max(0, time.monotonic() - self._status_received)
+        activities = s.get('activity', {})
+        tabs = self.query_one('#tabs', TabbedContent)
+        for name in self.cfg.roles:
+            entries = [(name, activities.get(name, {}))]
+            entries += [(x['session'], x) for x in s.get('work_sessions', []) if x['role'] == name]
+            entries += [(key, a) for key, a in activities.items() if key == name + ' (심사)']
+            title = Text(name)
+            for key, a in entries:
+                label, color = activity_label(a, now)
+                title.append(' · ' + (key.split('#', 1)[1] + ': ' if '#' in key else '') + label, style=color)
+            tabs.get_tab(_safe_id(name)).label = title
         mt = "∞" if s.get("max_turns") is None else s.get("max_turns")
         el = int(s.get("elapsed", 0))
         running = s.get("running")
         t = Text()
         if s.get("full_auto"):
             t.append("⚡전권 자동  ", style="bold red")
+        for name, a in activities.items():
+            if a.get('state') not in ('idle', 'done'):
+                label, color = activity_label(a, now)
+                t.append(name + ': ' + label + '  ', style=color)
         if s.get("paused"):
             t.append("⏸ 일시정지  ", style="bold yellow")
         if running:
@@ -294,9 +329,14 @@ class DuetApp(App):
     async def ask_approval(self, req: ApprovalRequest, reason: str, opinion: str | None) -> Decision:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self.bell()
-        self.push_screen(ApprovalScreen(req, reason, opinion),
+        screen = ApprovalScreen(req, reason, opinion)
+        self.push_screen(screen,
                          lambda r: fut.done() or fut.set_result(r or Decision(False, "사람이 거부", by="human")))
-        return await fut
+        try:
+            return await fut
+        finally:
+            if screen in self.screen_stack:
+                screen.dismiss(Decision(False, '승인 요청 종료', by='timeout'))
 
     async def ask_choice(self, title: str, body: str, options: list[tuple[str, str]]) -> str:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()

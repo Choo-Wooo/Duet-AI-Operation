@@ -23,7 +23,8 @@ def new_task(role: str, instruction: str, base_commit: str | None, baseline: dic
     task_id = "task-" + uuid4().hex[:12]
     return dict(id=task_id, role=role, instruction=instruction, agreement=True, phase="plan",
                 plan_path=f"docs/plans/{task_id}.md", submitted_version=0, agreed_version=None,
-                rounds=0, rounds_extra=0, base_commit=base_commit, test_command="",
+                rounds=0, rounds_extra=0, negotiations=0, negotiation_limit=6, negotiation_ask=False,
+                base_commit=base_commit, test_command="",
                 agreed_text_sha256=None, agreed_files=[], delegate_fingerprint=baseline,
                 agree_fingerprint={}, waiting=False, wait_reason="", review_n=0,
                 human_approved_version=None, plan_changes=[])
@@ -34,6 +35,11 @@ def validate_task(task: dict | None) -> None:
         return
     if not isinstance(task, dict):
         raise ValueError("task는 객체여야 합니다")
+    for name, default in [('negotiations', 0), ('negotiation_limit', 6)]:
+        task.setdefault(name, default)
+        if type(task[name]) is not int or task[name] < 0:
+            raise ValueError(f'잘못된 task.{name}')
+    task.setdefault('negotiation_ask', False)
     if not {"agreed_version", "human_approved_version", "agreed_text_sha256", "base_commit"} <= task.keys():
         raise ValueError("task의 합의/기준 필드가 누락되었습니다")
     for name in ("id", "role", "instruction", "phase", "plan_path", "test_command", "wait_reason"):

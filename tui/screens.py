@@ -1,6 +1,8 @@
 """승인·선택 팝업."""
 from __future__ import annotations
 
+from time import monotonic
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -26,13 +28,13 @@ class ApprovalScreen(ModalScreen[Decision]):
     DEFAULT_CSS = MODAL_CSS
     BINDINGS = [
         Binding("y", "allow", "허용"),
-        Binding("a", "allow_session", "세션 동안 허용"),
         Binding("n", "deny", "거부"),
     ]
 
     def __init__(self, req: ApprovalRequest, reason: str, opinion: str | None):
         super().__init__()
         self.req, self.reason, self.opinion = req, reason, opinion
+        self._keys_ready_at = float("inf")
 
     def compose(self) -> ComposeResult:
         body = Text()
@@ -53,12 +55,20 @@ class ApprovalScreen(ModalScreen[Decision]):
             yield Static(body, id="body")
             with Horizontal(id="buttons"):
                 yield Button("Y 허용", id="allow", variant="success")
-                yield Button("A 세션 동안 허용", id="allow_session", variant="primary")
+                yield Button("세션 동안 허용", id="allow_session", variant="primary")
                 yield Button("N 거부", id="deny", variant="error")
             yield Input(placeholder="거부 이유(선택) — 입력 후 Enter 면 거부", id="reason")
 
     def on_mount(self) -> None:
-        self.query_one("#allow", Button).focus()
+        self._keys_ready_at = monotonic() + 0.5
+        self.query_one("#deny", Button).focus()
+
+    async def _on_key(self, event) -> None:
+        if monotonic() < self._keys_ready_at:
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         getattr(self, "action_" + (event.button.id or "deny"))()
@@ -67,16 +77,24 @@ class ApprovalScreen(ModalScreen[Decision]):
         self.action_deny()
 
     def action_allow(self) -> None:
+        if monotonic() < self._keys_ready_at:
+            return
         self.dismiss(Decision(True, "사람 허용", by="human"))
 
     def action_allow_session(self) -> None:
+        if monotonic() < self._keys_ready_at:
+            return
         self.dismiss(Decision(True, "사람 허용(세션)", scope="session", by="human"))
 
     def action_deny(self) -> None:
+        if monotonic() < self._keys_ready_at:
+            return
         why = self.query_one("#reason", Input).value.strip()
         self.dismiss(Decision(False, why or "사람이 거부", by="human"))
 
     def check_action(self, action: str, parameters) -> bool | None:
+        if monotonic() < self._keys_ready_at:
+            return False
         # 거부 이유 입력 중에는 y/a/n 단축키를 끈다
         if action in ("allow", "allow_session", "deny") and isinstance(self.focused, Input):
             return False

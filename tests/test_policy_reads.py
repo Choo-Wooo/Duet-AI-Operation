@@ -44,9 +44,9 @@ def test_writer_role_unchanged():
 
 def test_verify_allows_agreed_command_trimmed_and_reads():
     task = {"phase": "verify", "test_command": "npm test", "waiting": False, "role": "implementer"}
-    for cmd in ("npm test", "npm test 2>&1 | tail -15", "bash -lc 'npm test | grep fail'", "grep -n x docs/a.md | head"):
+    for cmd in ("npm test", "npm test 2>&1 | tail -15", "grep -n x docs/a.md | head"):
         assert classify(ARCH, cmd, task) == AUTO, cmd
-    for cmd in ("node scripts/x.js", "npm test > out.txt", "npm test; rm x"):
+    for cmd in ("node scripts/x.js", "npm test > out.txt", "npm test; rm x", "bash -lc 'npm test | grep fail'"):
         assert classify(ARCH, cmd, task) == HUMAN, cmd
 
 
