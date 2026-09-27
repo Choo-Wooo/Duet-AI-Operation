@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from .core.config import Config, default_roles, detect_clis
+from .core.config import Config, default_roles, detect_clis, ensure_preset_roles
 from .core.dialogue import Dialogue
 from .core.events import EventBus
 from .core.gitops import Git
@@ -61,6 +61,8 @@ def setup_project(duet_dir: Path, project: Path, fake: bool) -> tuple[Config, li
     if not cfg.policy_file.exists():
         cfg.save_policy()
     cfg.load()
+    # 기존 프로젝트에 없는 기본 역할(디자이너·리서처)을 한 번 채워 넣는다
+    msgs.extend(ensure_preset_roles(cfg, {"claude": 1, "codex": 1, "agy": 1} if fake else clis))
     if not fake:
         used = sorted({r.cli for r in cfg.roles.values()})
         missing = [c for c in used if c not in clis]

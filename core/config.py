@@ -297,6 +297,96 @@ def detect_clis() -> dict[str, str]:
     return found
 
 
+# 역할 프리셋: (보여줄 이름, 설명, 선호 CLI 순서, CLI별 모델, 권한, 병렬 최대, effort, 자동 허용 도구, MCP)
+ROLE_PRESETS: dict[str, dict] = {
+    "designer": dict(
+        label="디자이너", clis=("claude", "codex", "agy"),
+        models={"claude": DESIGNER_MODEL, "codex": DEFAULT_MODELS["codex"], "agy": "gemini-3.1-pro-high"},
+        brief="화면·UX·API 형태·데이터 모델을 설계하고 시안(docs/design/, 목업 코드, 스타일)을 만든다. "
+              "구현자와 인터페이스를 맞추고, 결정 근거를 문서로 남긴다.",
+        permissions="workspace_write", max_sessions=2, context_limit=300000,
+        auto_tools=["mcp__playwright__*"], mcp=PLAYWRIGHT_MCP),
+    "researcher": dict(
+        label="리서처", clis=("agy", "claude", "codex"),
+        models={"agy": RESEARCHER_MODEL, "claude": DEFAULT_MODELS["claude"], "codex": DEFAULT_MODELS["codex"]},
+        brief="라이브러리·API·선행 사례·코드베이스를 조사해 근거와 출처가 있는 보고서를 docs/research/ 에 쓴다. "
+              "코드는 고치지 않는다.",
+        permissions="read_only", max_sessions=2, context_limit=300000),
+    "tester": dict(
+        label="테스터", clis=("codex", "claude", "agy"),
+        models={"codex": DEFAULT_MODELS["codex"], "claude": DEFAULT_MODELS["claude"], "agy": RESEARCHER_MODEL},
+        brief="수용 기준을 테스트로 옮기고 경계·오류·회귀 케이스를 보강한다. 실패를 재현하는 최소 테스트와 원인 분석을 보고한다.",
+        permissions="workspace_write", max_sessions=2, context_limit=300000, effort="medium"),
+    "reviewer": dict(
+        label="코드 리뷰어", clis=("claude", "codex", "agy"),
+        models={"claude": DEFAULT_MODELS["claude"], "codex": DEFAULT_MODELS["codex"], "agy": "gemini-3.1-pro-high"},
+        brief="변경 사항을 읽고 버그·보안·성능·설계 일관성 문제를 찾아 근거와 수정 제안을 docs/reviews/ 에 쓴다. 코드는 고치지 않는다.",
+        permissions="read_only", max_sessions=2, context_limit=300000),
+    "writer": dict(
+        label="문서 작성자", clis=("claude", "agy", "codex"),
+        models={"claude": DEFAULT_MODELS["claude"], "agy": RESEARCHER_MODEL, "codex": DEFAULT_MODELS["codex"]},
+        brief="README·사용 설명서·변경 기록·API 문서를 코드와 맞게 작성하고 갱신한다. docs/ 와 문서 파일만 쓴다.",
+        permissions="read_only", max_sessions=1, context_limit=300000),
+}
+# 기존 프로젝트에도 자동으로 채워 넣는 기본 역할
+AUTO_PRESET_ROLES = ("designer", "researcher")
+
+
+def preset_role(key: str, clis, name: str | None = None, cli: str | None = None,
+                model: str | None = None) -> Role | None:
+    """프리셋으로 역할을 만든다. cli 를 주지 않으면 설치된 CLI 중 선호 순서대로 고른다."""
+    p = ROLE_PRESETS.get(key)
+    if not p:
+        return None
+    cli = cli if cli in SUPPORTED_CLIS else next((c for c in p["clis"] if c in clis), None)
+    if not cli:
+        return None
+    return Role(name or key, cli, model or p["models"].get(cli) or DEFAULT_MODELS[cli], p["brief"], p["permissions"],
+                p.get("effort") if cli == "codex" else None, context_limit=p.get("context_limit"),
+                max_sessions=p.get("max_sessions", 1),
+                auto_tools=list(p.get("auto_tools") or []) if cli == "claude" else [],
+                mcp=dict(p.get("mcp") or {}) if cli == "claude" else {})
+
+
+def presets_info(clis) -> list[dict]:
+    out = []
+    for key, p in ROLE_PRESETS.items():
+        r = preset_role(key, clis)
+        out.append({"key": key, "label": p["label"], "available": r is not None,
+                    "cli": r.cli if r else None, "model": r.model if r else None,
+                    "brief": p["brief"], "permissions": p["permissions"], "max_sessions": p.get("max_sessions", 1),
+                    "effort": r.effort if r else None, "tools": bool(p.get("mcp"))})
+    return out
+
+
+def ensure_preset_roles(cfg: "Config", clis) -> list[str]:
+    """기존 프로젝트에 기본 역할(디자이너·리서처)이 없으면 한 번만 채워 넣는다.
+    사람이 지운 역할은 다시 넣지 않는다 (settings.preset_roles_added 에 기록).
+    이미 있는 디자이너 역할에는 브라우저 도구(Playwright MCP)만 더한다."""
+    msgs: list[str] = []
+    done = list(cfg.settings.get("preset_roles_added") or [])
+    changed = False
+    for key in AUTO_PRESET_ROLES:
+        if key in done:
+            continue
+        done.append(key)
+        changed = True
+        if key in cfg.roles:
+            r = cfg.roles[key]
+            if key == "designer" and r.cli == "claude" and not r.mcp and not r.auto_tools:
+                r.mcp, r.auto_tools = dict(PLAYWRIGHT_MCP), ["mcp__playwright__*"]
+                msgs.append("designer 역할에 브라우저 도구(Playwright MCP)를 붙였습니다 (스크린샷으로 화면 확인).")
+            continue
+        r = preset_role(key, clis)
+        if r:
+            cfg.roles[key] = r
+            msgs.append(f"{ROLE_PRESETS[key]['label']} 역할을 추가했습니다: {key}={r.cli}/{r.model} (역할·모델 화면에서 변경·삭제)")
+    if changed:
+        cfg.settings["preset_roles_added"] = done
+        cfg.save_roles()
+    return msgs
+
+
 def default_roles(clis: dict[str, str]) -> tuple[str, dict[str, Role]]:
     arch_cli = "claude" if "claude" in clis else ("codex" if "codex" in clis else "agy")
     impl_cli = "codex" if "codex" in clis else ("claude" if "claude" in clis else "agy")
@@ -314,21 +404,8 @@ def default_roles(clis: dict[str, str]) -> tuple[str, dict[str, Role]]:
             "workspace_write", "medium" if impl_cli == "codex" else None, context_limit=300000, max_sessions=3,
         ),
     }
-    if "claude" in clis:
-        roles["designer"] = Role(
-            "designer", "claude", DESIGNER_MODEL,
-            "화면·UX·API 형태·데이터 모델을 설계하고 시안(docs/design/, 목업 코드, 스타일)을 만든다. "
-            "구현자와 인터페이스를 맞추고, 결정 근거를 문서로 남긴다.",
-            "workspace_write", context_limit=300000, max_sessions=2,
-            auto_tools=["mcp__playwright__*"], mcp=dict(PLAYWRIGHT_MCP),
-        )
-    researcher_cli = "agy" if "agy" in clis else ("claude" if "claude" in clis else None)
-    if researcher_cli:
-        roles["researcher"] = Role(
-            "researcher", researcher_cli,
-            RESEARCHER_MODEL if researcher_cli == "agy" else DEFAULT_MODELS[researcher_cli],
-            "라이브러리·API·선행 사례·코드베이스를 조사해 근거와 출처가 있는 보고서를 docs/research/ 에 쓴다. "
-            "코드는 고치지 않는다.",
-            "read_only", context_limit=300000, max_sessions=2,
-        )
+    for key in AUTO_PRESET_ROLES:
+        r = preset_role(key, clis)
+        if r:
+            roles[key] = r
     return "architect", roles

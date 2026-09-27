@@ -156,3 +156,28 @@ def test_resume_work_with_answer(tmp_path):
     orch.work.schedule = lambda: None
     orch.work.handle_directives([("RESUME_WORK", "ui 파랑으로 가세요")])
     assert it.status == "queued" and it.inbox == ["설계자: 파랑으로 가세요"]
+
+
+def test_presets_and_existing_project_fill(tmp_path):
+    from duet.core.config import ensure_preset_roles, preset_role, presets_info
+    cfg = Config(tmp_path)
+    cfg.dir.mkdir()
+    cfg.roles = {"architect": Role("architect", "claude", permissions="read_only"),
+                 "designer": Role("designer", "claude", "claude-opus-5-5", "내 설명")}
+    cfg.save_roles()
+    cfg.load()
+    msgs = ensure_preset_roles(cfg, {"claude": 1, "agy": 1})
+    assert cfg.roles["designer"].brief == "내 설명" and "playwright" in cfg.roles["designer"].mcp
+    assert cfg.roles["researcher"].cli == "agy" and len(msgs) == 2
+    # 사람이 지운 역할은 다시 넣지 않는다
+    del cfg.roles["researcher"]
+    cfg.save_roles()
+    cfg2 = Config(tmp_path)
+    cfg2.load()
+    assert ensure_preset_roles(cfg2, {"claude": 1, "agy": 1}) == [] and "researcher" not in cfg2.roles
+    # CLI 가 없으면 다음 선호 CLI 로
+    assert preset_role("researcher", {"claude": 1}).cli == "claude"
+    assert preset_role("tester", {}) is None
+    info = {p["key"]: p for p in presets_info({"codex": 1})}
+    assert info["tester"]["available"] and info["tester"]["cli"] == "codex" and info["tester"]["effort"] == "medium"
+    assert info["designer"]["cli"] == "codex" and info["designer"]["available"]

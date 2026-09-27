@@ -227,7 +227,9 @@ td button { white-space: nowrap; margin-bottom: 4px; }
             <table><thead><tr><th>역할</th><th>CLI</th><th>모델</th><th>effort</th><th>권한</th><th>병렬 최대</th><th>컨텍스트 한도</th><th></th></tr></thead>
               <tbody id="roles"></tbody></table></div>
           <div class="card"><h4>역할 추가</h4>
+            <div class="help">프리셋을 고르면 역할 설명·권한·모델·병렬 수와 역할 전용 도구가 채워집니다. 필요한 칸만 고쳐서 추가하세요.</div>
             <div class="row">
+              <select id="nrPreset" title="역할 프리셋"></select>
               <input id="nrName" placeholder="이름 (예: tester)">
               <select id="nrCli"></select>
               <select id="nrModel"></select>
@@ -632,12 +634,25 @@ function renderBoard(items) {
 
 // ---------------- 역할·모델 ----------------
 const modelsFor = cli => ((S.models && S.models.clis && S.models.clis[cli]) || {}).models || [];
+const CLI_LABEL = {claude: "Claude Code", codex: "Codex", agy: "Antigravity"};
+// 조회한 모든 CLI 의 모델을 CLI 별로 묶어 보여 준다. 값은 "cli::model" (다른 CLI 모델을 고르면 CLI 도 함께 바뀜)
 function modelOptions(cli, cur) {
-  const ms = modelsFor(cli);
-  let html = `<option value="">(CLI 기본)</option>` + ms.map(m => `<option value="${esc(m.id)}" ${m.id === cur ? "selected" : ""}>${esc(m.name)}${m.name !== m.id ? " — " + esc(m.id) : ""}</option>`).join("");
-  if (cur && !ms.some(m => m.id === cur)) html += `<option value="${esc(cur)}" selected>${esc(cur)} (목록에 없음)</option>`;
+  let html = `<option value="${esc(cli)}::">(${esc(CLI_LABEL[cli] || cli)} 기본 모델)</option>`;
+  let found = !cur;
+  for (const c of S.clis) {
+    const ms = modelsFor(c);
+    const seen = new Set();
+    const opts = ms.filter(m => !seen.has(m.id) && seen.add(m.id)).map(m => {
+      const sel = c === cli && m.id === cur; if (sel) found = true;
+      return `<option value="${esc(c)}::${esc(m.id)}" ${sel ? "selected" : ""}>${esc(m.name)}${m.name !== m.id ? " — " + esc(m.id) : ""}</option>`;
+    }).join("");
+    const note = (S.installed || []).includes(c) ? "" : " (설치 안 됨)";
+    if (opts) html += `<optgroup label="${esc(CLI_LABEL[c] || c)}${note}">${opts}</optgroup>`;
+  }
+  if (!found) html += `<option value="${esc(cli)}::${esc(cur)}" selected>${esc(cur)} (목록에 없음)</option>`;
   return html + `<option value="__custom">직접 입력…</option>`;
 }
+const splitModel = v => { const i = v.indexOf("::"); return i < 0 ? [null, v] : [v.slice(0, i), v.slice(i + 2)]; };
 function renderRoles() {
   if (!S) return;
   const efforts = ["", "low", "medium", "high", "xhigh"];
@@ -652,18 +667,46 @@ function renderRoles() {
     <td>${r.is_main ? "" : `<button data-main>메인으로</button> <button class="danger" data-del>삭제</button>`}</td></tr>`).join("");
   $("#roles").querySelectorAll("tr").forEach(tr => {
     const name = tr.dataset.n;
+    const role = S.roles.find(x => x.name === name);
     tr.querySelectorAll("[data-f]").forEach(el => el.onchange = () => {
       let v = el.value;
-      if (el.dataset.f === "model" && v === "__custom") { v = prompt("모델 id", ""); if (!v) { renderRoles(); return; } }
+      if (el.dataset.f === "model") {
+        if (v === "__custom") { v = prompt("모델 id", ""); if (!v) { renderRoles(); return; } send({type: "role_set", name, field: "model", value: v}); return; }
+        const [cli, id] = splitModel(v);
+        if (cli && role && cli !== role.cli) send({type: "role_set", name, field: "cli", value: cli});
+        send({type: "role_set", name, field: "model", value: id});
+        return;
+      }
+      if (el.dataset.f === "cli") {  // CLI 를 바꾸면 모델은 그 CLI 의 기본값으로
+        send({type: "role_set", name, field: "cli", value: v});
+        send({type: "role_set", name, field: "model", value: ""});
+        return;
+      }
       if (el.dataset.f === "context_limit" && !v) v = "default";
       send({type: "role_set", name, field: el.dataset.f, value: v});
     });
     const m = tr.querySelector("[data-main]"); if (m) m.onclick = () => send({type: "role_set", name, field: "main"});
     const d = tr.querySelector("[data-del]"); if (d) d.onclick = () => { if (confirm(name + " 역할을 삭제할까요?")) send({type: "role_remove", name}); };
   });
-  const nc = $("#nrCli"); if (!nc.options.length) { nc.innerHTML = S.clis.map(c => `<option>${c}</option>`).join(""); nc.onchange = () => $("#nrModel").innerHTML = modelOptions(nc.value, ""); }
-  $("#nrModel").innerHTML = modelOptions(nc.value, $("#nrModel").value);
+  const nc = $("#nrCli");
+  if (!nc.options.length) {
+    nc.innerHTML = S.clis.map(c => `<option value="${c}">${esc(CLI_LABEL[c] || c)}</option>`).join("");
+    nc.onchange = () => { $("#nrModel").innerHTML = modelOptions(nc.value, ""); };
+    $("#nrModel").onchange = () => { const [cli] = splitModel($("#nrModel").value); if (cli && cli !== nc.value) { nc.value = cli; } };
+  }
+  const [, curModel] = splitModel($("#nrModel").value || "");
+  $("#nrModel").innerHTML = modelOptions(nc.value, curModel);
   const np = $("#nrPerm"); if (!np.options.length) np.innerHTML = S.permissions.map(p => `<option>${p}</option>`).join("");
+  const pr = $("#nrPreset"), cur = pr.value;
+  pr.innerHTML = `<option value="">프리셋 없이 직접 입력</option>` + (S.presets || []).map(p =>
+    `<option value="${esc(p.key)}" ${p.available ? "" : "disabled"}>${esc(p.label)} (${esc(p.key)})${p.available ? " — " + esc(CLI_LABEL[p.cli] || p.cli) + " · " + esc(p.model) : " — 쓸 수 있는 CLI 없음"}${S.roles.some(r => r.name === p.key) ? " · 이미 있음" : ""}</option>`).join("");
+  pr.value = cur;
+  pr.onchange = () => {
+    const p = (S.presets || []).find(x => x.key === pr.value); if (!p) return;
+    let name = p.key, n = 2; while (S.roles.some(r => r.name === name)) name = p.key + n++;
+    $("#nrName").value = name; nc.value = p.cli; $("#nrModel").innerHTML = modelOptions(p.cli, p.model);
+    $("#nrPerm").value = p.permissions; $("#nrMax").value = p.max_sessions; $("#nrBrief").value = p.brief;
+  };
 }
 function renderModels() {
   if (!S) return;
@@ -751,8 +794,11 @@ $("#modal").onclick = e => { if (e.target.id === "modal") $("#modal").classList.
 $("#saveBtn").onclick = () => send({type: "save", name: $("#saveName").value.trim(), note: $("#saveNote").value, force: $("#saveForce").checked});
 $("#modelsRefresh").onclick = () => send({type: "models_refresh"});
 $("#nrAdd").onclick = () => {
-  let model = $("#nrModel").value; if (model === "__custom") model = prompt("모델 id", "") || "";
-  send({type: "role_add", name: $("#nrName").value.trim(), cli: $("#nrCli").value, model, permissions: $("#nrPerm").value, max_sessions: $("#nrMax").value, brief: $("#nrBrief").value});
+  let cli = $("#nrCli").value, model = $("#nrModel").value;
+  if (model === "__custom") model = prompt("모델 id", "") || "";
+  else { const [c, id] = splitModel(model); if (c) cli = c; model = id; }
+  send({type: "role_add", preset: $("#nrPreset").value, name: $("#nrName").value.trim(), cli, model, permissions: $("#nrPerm").value, max_sessions: $("#nrMax").value, brief: $("#nrBrief").value});
+  $("#nrPreset").value = "";
 };
 if ("Notification" in window && Notification.permission === "default") document.addEventListener("click", () => Notification.requestPermission(), {once: true});
 connect();

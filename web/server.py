@@ -20,7 +20,7 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from .. import commands
-from ..core.config import PERMISSION_PROFILES, SUPPORTED_CLIS, Config, Role, validate_role_name
+from ..core.config import PERMISSION_PROFILES, ROLE_PRESETS, SUPPORTED_CLIS, Config, Role, preset_role, presets_info, validate_role_name
 from ..core.events import Event, EventBus
 from ..core.models import read_cache, refresh
 from ..core.orchestrator import Orchestrator
@@ -64,6 +64,8 @@ class WebUI:
         self.asks: dict[str, Any] = {}  # 질문 패널 세션 (역할별)
         self.ask_lock = asyncio.Lock()
         self.models: dict | None = read_cache(cfg.dir)
+        from ..core.config import detect_clis
+        self.installed = set(SUPPORTED_CLIS) if fake else set(detect_clis())
         self.startup = msgs
         bus.subscribe(self._on_event)
 
@@ -145,6 +147,8 @@ class WebUI:
                       for r in self.cfg.roles.values()],
             "main": self.cfg.main,
             "clis": list(SUPPORTED_CLIS),
+            "installed": sorted(self.installed),
+            "presets": presets_info(self.installed),
             "permissions": list(PERMISSION_PROFILES),
             "modes": {n: {"max_turns": m.max_turns, "style": m.style, "autonomy": m.autonomy}
                       for n, m in self.cfg.modes.items()},
@@ -294,9 +298,19 @@ class WebUI:
             ms = max(1, int(msg.get("max_sessions") or 1))
         except ValueError:
             ms = 1
-        self.orch.add_role(Role(name, cli, msg.get("model") or None, str(msg.get("brief") or ""), perm,
-                                msg.get("effort") or None, max_sessions=ms))
-        return {"type": "output", "text": f"역할 추가: {name}", "state": self.state()}
+        role = Role(name, cli, msg.get("model") or None, str(msg.get("brief") or ""), perm,
+                    msg.get("effort") or None, max_sessions=ms)
+        preset = str(msg.get("preset") or "")
+        if preset in ROLE_PRESETS:  # 프리셋: 설명·권한 외에 역할 전용 도구(MCP·자동 허용)와 한도도 채운다
+            base = preset_role(preset, self.installed, name=name, cli=cli, model=role.model)
+            if base:
+                base.brief = role.brief or base.brief
+                base.permissions, base.max_sessions = perm, ms
+                if role.effort:
+                    base.effort = role.effort
+                role = base
+        self.orch.add_role(role)
+        return {"type": "output", "text": f"역할 추가: {name} ({role.cli}/{role.model or '기본'})", "state": self.state()}
 
     def _setting(self, msg: dict) -> dict:
         key, raw = str(msg.get("key")), msg.get("value")
