@@ -98,7 +98,17 @@ python3 duet          # 터미널 분할 화면(TUI)
 
 ### Windows
 
-PowerShell 에서 `python duet --web` (또는 `py duet --web`)으로 실행합니다. macOS 와 다른 점은 다음과 같습니다.
+처음에는 `duet\setup-windows.bat` 을 실행해 환경을 점검·설치합니다 (탐색기에서 더블클릭해도 됩니다).
+
+```bat
+duet\setup-windows.bat          :: 점검하고, 빠진 것은 하나씩 물어본 뒤 설치 (winget·npm·공식 설치 스크립트)
+duet\setup-windows.bat /check   :: 점검만
+duet\setup-windows.bat /yes     :: 묻지 않고 빠진 것 모두 설치
+```
+
+Python 3.10+, Git(2.38+ 권장)·Git Bash, Node.js, claude/codex/agy 설치와 로그인 여부, `.duet\venv` 가상환경을 확인합니다. agy 는 자동 설치하지 않으므로 https://antigravity.google 안내에 따라 설치하세요.
+
+그다음 PowerShell 에서 `python duet --web` (또는 `py duet --web`)으로 실행합니다. macOS 와 다른 점은 다음과 같습니다.
 
 - CLI 는 `claude.exe`(네이티브 설치 `~\.local\bin`), npm 전역 설치(`%APPDATA%\npm`), Codex·agy 설치 폴더에서도 찾습니다.
 - 에이전트가 합의한 테스트 명령은 Git Bash 로 실행합니다(에이전트가 bash 문법으로 쓰기 때문). Git Bash 가 없으면 `cmd` 로 실행합니다.
