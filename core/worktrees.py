@@ -14,7 +14,9 @@ import json
 import hashlib
 from pathlib import Path
 
+from .fsutil import is_link, link_dir, unlink_dir
 from .gitops import Git, temporary_index
+from .procs import run_text
 
 BRANCH_PREFIX = "duet/work/"
 WORKTREE_DIR = Path(".duet") / "worktrees"
@@ -57,8 +59,7 @@ class Worktrees:
     def git(self, *args: str, cwd: Path | None = None, check: bool = False,
             env: dict | None = None, input: str | None = None) -> subprocess.CompletedProcess:
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_EDITOR": "true", **(env or {})}
-        r = subprocess.run(["git", *self._ident, *args], cwd=cwd or self.project, capture_output=True, text=True,
-                           env=env, input=input)
+        r = run_text(["git", *self._ident, *args], cwd=cwd or self.project, env=env, input=input)
         if check and r.returncode != 0:
             raise GitError(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()}")
         return r
@@ -107,12 +108,12 @@ class Worktrees:
         path = hooks / "pre-push"
         try:
             if path.exists():
-                if PRE_PUSH_MARK in path.read_text(errors="replace"):
+                if PRE_PUSH_MARK in path.read_text(encoding="utf-8", errors="replace"):
                     return None
                 return ("기존 pre-push 훅이 있어 duet 보호 훅을 넣지 않았습니다. duet/work/* 브랜치는 병합 후 자동 삭제되지만, "
                         "push 전에 git branch 로 확인하세요.")
             hooks.mkdir(parents=True, exist_ok=True)
-            path.write_text(PRE_PUSH)
+            path.write_text(PRE_PUSH, encoding="utf-8", newline="\n")  # Windows 에서도 LF (sh 가 CR 을 못 읽음)
             path.chmod(0o755)
         except OSError as e:
             return f"pre-push 훅을 넣지 못했습니다: {e}"
@@ -167,34 +168,40 @@ class Worktrees:
             if src.is_dir() and not dst.exists() and self.git("check-ignore", "-q", name).returncode == 0:
                 try:
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    dst.symlink_to(src, target_is_directory=True)
+                    link_dir(dst, src)
                 except OSError:
                     pass
         self._protect_deps(path)
 
     def _protect_deps(self, path: Path) -> None:
         names = [name for name in SHARED_DEP_DIRS
-                 if (path / name).is_symlink() and (self.project / name).is_dir()
+                 if is_link(path / name) and (self.project / name).is_dir()
                  and (path / name).resolve() == (self.project / name).resolve()]
         if not names:
             return
         exclude = Path(self.git("rev-parse", "--git-path", "info/exclude", cwd=path, check=True).stdout.strip())
         if not exclude.is_absolute():
             exclude = path / exclude
-        previous = exclude.read_text() if exclude.exists() else ""
+        previous = exclude.read_text(encoding="utf-8", errors="replace") if exclude.exists() else ""
         additions = ['/' + self.prefix + name for name in names
                      if '/' + self.prefix + name not in previous.splitlines()]
         if additions:
             exclude.parent.mkdir(parents=True, exist_ok=True)
-            with exclude.open("a") as stream:
+            with exclude.open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(("\n" if previous and not previous.endswith("\n") else "")
                              + "\n".join(additions) + "\n")
         for name in names:
-            self.git("rm", "--cached", "-f", "--ignore-unmatch", "--", name, cwd=path, check=True)
+            self.git("rm", "--cached", "-r", "-f", "--ignore-unmatch", "-q", "--", name, cwd=path, check=True)  # -r: Windows 정션은 폴더로 잡힌다
 
     def remove(self, wid: str) -> None:
         path, branch = self.root_for(wid), self.branch_for(wid)
         if path.exists():
+            # 의존성 폴더 링크를 먼저 끊는다 (Windows 정션을 따라 원본 node_modules 등이 지워지지 않게)
+            for name in SHARED_DEP_DIRS:
+                try:
+                    unlink_dir(self.path_for(wid) / name)
+                except (OSError, GitError):
+                    pass
             self.git("worktree", "remove", "--force", str(path))
         self.git("worktree", "prune")
         self.git("branch", "-D", branch)
@@ -260,7 +267,7 @@ class Worktrees:
     def finish_merge(self, path: Path) -> None:
         metadata = None
         if self.prefix:
-            metadata = json.loads(self._merge_marker(path).read_text())
+            metadata = json.loads(self._merge_marker(path).read_text(encoding="utf-8"))
             # An unchanged synthesized conflict file is not a resolution. Users
             # may explicitly git add it to choose that side; edits remain auto-staged.
             for name in self.unresolved(path):
@@ -385,5 +392,6 @@ class Worktrees:
         if conflicts and keep_conflicts:
             target = self.git('rev-parse', incoming, cwd=path, check=True).stdout.strip()
             self._merge_marker(path).write_text(json.dumps(dict(target=target,
-                conflicts={name: self._file_signature(path / name) for name in conflicts}), ensure_ascii=False))
+                conflicts={name: self._file_signature(path / name) for name in conflicts}), ensure_ascii=False),
+                encoding="utf-8")
         return conflicts

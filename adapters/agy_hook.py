@@ -19,14 +19,19 @@ def main() -> int:
     if not bridge:
         return 0  # duet 밖의 agy: 개입하지 않음
     try:
-        payload = json.load(sys.stdin)
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
     except Exception:
         payload = {}
     req = {"token": os.environ.get("DUET_AGY_TOKEN", ""), "payload": payload}
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        if bridge.startswith("tcp:"):  # Windows: 127.0.0.1 TCP 포트
+            host, _, port = bridge[4:].rpartition(":")
+            family, address = socket.AF_INET, (host, int(port))
+        else:
+            family, address = socket.AF_UNIX, bridge
+        with socket.socket(family, socket.SOCK_STREAM) as s:
             s.settimeout(float(os.environ.get("DUET_AGY_HOOK_TIMEOUT", "3500")))
-            s.connect(bridge)
+            s.connect(address)
             s.sendall(json.dumps(req).encode() + b"\n")
             buf = b""
             while not buf.endswith(b"\n"):
@@ -37,7 +42,8 @@ def main() -> int:
         answer = json.loads(buf.decode() or "{}")
     except Exception as e:  # duet 과 연결이 끊겼으면 안전하게 거부
         answer = {"decision": "deny", "reason": f"duet 권한 확인에 실패했습니다: {e}"}
-    print(json.dumps(answer, ensure_ascii=False))
+    sys.stdout.write(json.dumps(answer, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
     return 0
 
 

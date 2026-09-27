@@ -7,6 +7,8 @@ import pytest
 
 from duet.core.gitops import Git
 from duet.core.worktrees import Worktrees, GitError
+from duet.core.fsutil import is_link
+from duet.core import work as work_mod
 from duet.core.config import Config, Role
 from duet.core.events import EventBus
 from duet.core.dialogue import Dialogue
@@ -19,6 +21,9 @@ def git(path, *args):
     p = subprocess.run(['git', *args], cwd=path, capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
     return p.stdout.strip()
+
+
+pytestmark = pytest.mark.git238
 
 
 @pytest.fixture(params=['app', 'space 한글/nested'])
@@ -114,7 +119,7 @@ def test_sparse_create_reuse_deps_and_scoped_diff(repo):
     assert path == expected
     assert wt.path_for('one') == path
     assert not (p/'.duet/worktrees/one/sibling').exists()
-    assert (path/'node_modules').is_symlink()
+    assert is_link(path/'node_modules')  # Windows 는 정션
     assert wt.create('one', 'main') == path
     (path/'code').write_text('work'); (path/'new').write_text('new')
     assert set(wt.changed_files(path, 'main')) == {'code','new'}
@@ -193,14 +198,14 @@ def test_fake_parallel_flow_cwd_and_final_commit(repo, monkeypatch):
             assert self.project==expected
         return await original(self,prompt)
     monkeypatch.setattr(FakeAdapter,'_work_turn',work)
-    shell = asyncio.create_subprocess_shell
+    shell = work_mod.create_shell
     test_cwds = []
     async def checked_shell(command, **kwargs):
         # Observe the real subprocess call without replacing its execution.
         test_cwds.append(Path(kwargs['cwd']))
         assert test_cwds[-1] == p/'.duet/worktrees/one'/p.relative_to(root)
         return await shell(command, **kwargs)
-    monkeypatch.setattr(asyncio, 'create_subprocess_shell', checked_shell)
+    monkeypatch.setattr(work_mod, 'create_shell', checked_shell)
     async def run():
         before=outside_dirty(root)
         assert o.work.submit([{'id':'one','role':'implementer','task':'one.txt'}],1)==[]

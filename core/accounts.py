@@ -9,6 +9,7 @@ import json
 import os
 
 from .clis import which
+from .procs import group_kwargs, install_asyncio_policy, reap
 
 PLAN_NAMES = {
     "free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro Lite", "team": "Team",
@@ -52,7 +53,7 @@ async def _codex_account() -> str:
         return "Codex 계정: codex CLI 없음"
     proc = await asyncio.create_subprocess_exec(
         exe, "app-server", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024)
+        stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024, **group_kwargs())
 
     async def call(rid: int, method: str, params: dict) -> dict:
         proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}) + "\n").encode())
@@ -77,11 +78,7 @@ async def _codex_account() -> str:
         await proc.stdin.drain()
         res = await call(2, "account/read", {})
     finally:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        await proc.wait()
+        await reap(proc)
     acc = res.get("account")
     if not acc:
         return "경고: Codex 로그인 정보가 없습니다. 터미널에서 codex login 을 실행하세요."
@@ -128,6 +125,7 @@ def check_accounts(clis: list[str], timeout: float = 25) -> list[str]:
         msgs.append("경고: ANTHROPIC_API_KEY 환경변수가 설정돼 있습니다. Claude Code 가 구독 대신 API 키로 과금될 수 있습니다.")
     if "codex" in clis and os.environ.get("OPENAI_API_KEY"):
         msgs.append("참고: OPENAI_API_KEY 환경변수가 설정돼 있습니다 (Codex 는 로그인 방식에 따라 무시할 수 있음).")
+    install_asyncio_policy()
     try:
         msgs.extend(asyncio.run(_probe(clis, timeout)))
     except Exception as e:

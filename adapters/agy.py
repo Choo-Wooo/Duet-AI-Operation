@@ -11,7 +11,6 @@ import asyncio
 import json
 import os
 import secrets
-import signal
 import sys
 import tempfile
 from collections import deque
@@ -19,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from ..core.clis import which
+from ..core.procs import WINDOWS, close_transport, group_kwargs, interrupt_tree, interrupted_code, kill_tree, \
+    terminate_tree
 from ..core.policy import PLAN_DENY_TEXT, ApprovalRequest, read_only_command, tool_matches
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
 
@@ -81,6 +82,27 @@ def to_request(role: str, name: str, args: dict) -> ApprovalRequest:
     return ApprovalRequest(role, "tool", _detail(name, args), tool=name, detail={"input": args})
 
 
+def _hook_command(python: str, script: str) -> str:
+    if not WINDOWS:
+        return f'"{python}" "{script}"'
+    # Windows 의 agy 는 훅을 `cmd /c <명령>` 으로 실행하면서 큰따옴표를 \" 로 바꿔 넘겨 cmd 가 읽지 못한다.
+    # 그래서 따옴표 없이 쓰고, 공백이 있는 경로는 8.3 짧은 경로로 바꾼다.
+    return " ".join(_no_space_path(p) for p in (python, script))
+
+
+def _no_space_path(path: str) -> str:
+    if " " not in path:
+        return path
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        if ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf)) and " " not in buf.value:
+            return buf.value
+    except (ImportError, AttributeError, OSError):
+        pass
+    return f'"{path}"'  # 짧은 경로를 쓸 수 없는 드라이브: 최선의 시도
+
+
 def install_hook(workdir: Path, python: str | None = None) -> Path:
     """작업 폴더 .agents/hooks.json 에 duet 훅을 넣는다 (사용자 훅은 보존). git 에서는 로컬 제외 처리."""
     path = workdir / ".agents" / "hooks.json"
@@ -92,7 +114,7 @@ def install_hook(workdir: Path, python: str | None = None) -> Path:
     except (OSError, json.JSONDecodeError):
         data = {}
     created = not path.exists()
-    cmd = f'"{python or sys.executable}" "{HOOK_SCRIPT}"'
+    cmd = _hook_command(python or sys.executable, str(HOOK_SCRIPT))
     data[HOOK_NAME] = {"enabled": True, "PreToolUse": [
         {"matcher": "*", "hooks": [{"type": "command", "command": cmd, "timeout": 3600}]}]}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -106,7 +128,9 @@ def _git_exclude(workdir: Path, pattern: str) -> None:
     git = workdir / ".git"
     try:
         if git.is_file():  # 워크트리: "gitdir: <main>/.git/worktrees/<id>"
-            gd = Path(git.read_text().split(":", 1)[1].strip())
+            gd = Path(git.read_text(encoding="utf-8").split(":", 1)[1].strip())
+            if not gd.is_absolute():
+                gd = (workdir / gd).resolve()
             common = gd.parent.parent if gd.parent.name == "worktrees" else gd
         elif git.is_dir():
             common = git
@@ -114,9 +138,9 @@ def _git_exclude(workdir: Path, pattern: str) -> None:
             return
         ex = common / "info" / "exclude"
         ex.parent.mkdir(parents=True, exist_ok=True)
-        lines = ex.read_text().splitlines() if ex.exists() else []
+        lines = ex.read_text(encoding="utf-8", errors="replace").splitlines() if ex.exists() else []
         if pattern not in lines:
-            ex.write_text("\n".join(lines + [pattern]) + "\n")
+            ex.write_text("\n".join(lines + [pattern]) + "\n", encoding="utf-8", newline="\n")
     except OSError:
         pass
 
@@ -136,8 +160,16 @@ class AgyAdapter(AgentAdapter):
         self.fork_session = False
         self._stderr: deque[str] = deque(maxlen=30)
         self._token = secrets.token_hex(16)
-        self._sock = str(Path(tempfile.gettempdir()) / f"duet-agy-{os.getpid()}-{secrets.token_hex(4)}.sock")
-        self._server = await asyncio.start_unix_server(self._on_hook, path=self._sock)
+        if WINDOWS or not hasattr(asyncio, "start_unix_server"):
+            # Windows: 유닉스 소켓 대신 이 컴퓨터 안(127.0.0.1)의 TCP 포트. 토큰으로 호출자를 확인한다
+            self._sock = None
+            self._server = await asyncio.start_server(self._on_hook, host="127.0.0.1", port=0)
+            port = self._server.sockets[0].getsockname()[1]
+            self._bridge = f"tcp:127.0.0.1:{port}"
+        else:
+            self._sock = str(Path(tempfile.gettempdir()) / f"duet-agy-{os.getpid()}-{secrets.token_hex(4)}.sock")
+            self._server = await asyncio.start_unix_server(self._on_hook, path=self._sock)
+            self._bridge = self._sock
         install_hook(self.project)
         self._system_sent = bool(self.session_id)
         self._hook_calls = 0
@@ -199,13 +231,14 @@ class AgyAdapter(AgentAdapter):
         texts: list[str] = []
         partial: dict[int, list[str]] = {}
         self._hook_calls = self._tool_steps = 0
-        env = {**os.environ, "DUET_AGY_BRIDGE": self._sock, "DUET_AGY_TOKEN": self._token}
+        self._interrupting = False
+        env = {**os.environ, "DUET_AGY_BRIDGE": self._bridge, "DUET_AGY_TOKEN": self._token}
         err_task = None
         try:
             self.proc = await asyncio.create_subprocess_exec(
                 *self._argv(prompt), cwd=str(self.project), env=env, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=64 * 1024 * 1024,
-                start_new_session=True)
+                **group_kwargs())
             err_task = asyncio.create_task(self._read_stderr(self.proc))
             final: dict | None = None
             assert self.proc.stdout
@@ -237,7 +270,7 @@ class AgyAdapter(AgentAdapter):
                 result.ok = False
                 tail = "\n".join(list(self._stderr)[-5:])
                 result.error = f"agy 가 결과 없이 끝났습니다 (코드 {rc})" + (f"\n{tail}" if tail else "")
-                if rc in (-signal.SIGINT, -signal.SIGTERM, 130):
+                if interrupted_code(rc) or self._interrupting:
                     result.interrupted = True
             else:
                 self.session_id = final.get("conversation_id") or self.session_id
@@ -262,11 +295,9 @@ class AgyAdapter(AgentAdapter):
             # handle so a delayed response cannot outlive this connection.
             if self.proc is not None:
                 if self.proc.returncode is None:
-                    try:
-                        os.killpg(self.proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    kill_tree(self.proc.pid)
                 await self.proc.wait()
+                close_transport(self.proc)
             raise
         except Exception as e:
             result.ok = False
@@ -277,6 +308,8 @@ class AgyAdapter(AgentAdapter):
                 err_task.cancel()
                 await asyncio.gather(err_task, return_exceptions=True)
             self.busy = False
+            if self.proc is not None and self.proc.returncode is not None:
+                close_transport(self.proc)
             self.proc = None
         result.text = texts[-1] if texts else ""
         result.full_text = "\n\n".join(texts)
@@ -330,17 +363,12 @@ class AgyAdapter(AgentAdapter):
 
     async def interrupt(self) -> None:
         if self.proc and self.proc.returncode is None:
-            try:
-                os.killpg(self.proc.pid, signal.SIGINT)
-            except (ProcessLookupError, PermissionError):
-                pass
+            self._interrupting = True
+            interrupt_tree(self.proc.pid)
 
     async def close(self) -> None:
         if self.proc and self.proc.returncode is None:
-            try:
-                os.killpg(self.proc.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+            terminate_tree(self.proc.pid)
         server = getattr(self, "_server", None)
         if server:
             server.close()

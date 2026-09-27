@@ -65,6 +65,9 @@ def fake_agy(tmp_path, monkeypatch):
     log = tmp_path / "agy-args.log"
     monkeypatch.setenv("FAKE_AGY_LOG", str(log))
     monkeypatch.setattr(agy_mod, "which", lambda name: str(exe))
+    if os.name == "nt":  # Windows 는 #! 스크립트를 바로 실행할 수 없어 파이썬으로 띄운다
+        argv = AgyAdapter._argv
+        monkeypatch.setattr(AgyAdapter, "_argv", lambda self, prompt: [sys.executable, *argv(self, prompt)])
     return log
 
 

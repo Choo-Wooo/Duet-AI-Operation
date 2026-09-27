@@ -186,7 +186,6 @@ def test_tui_timeout_removes_only_its_screen_and_late_answer_is_ignored(orch):
 
 
 def test_agy_timeout_interrupts_and_reaps_process_before_discard(orch, monkeypatch):
-    import signal
     from duet.adapters.agy import AgyAdapter
     async def run():
         class Stream:
@@ -194,15 +193,16 @@ def test_agy_timeout_interrupts_and_reaps_process_before_discard(orch, monkeypat
             async def __anext__(self): await asyncio.Event().wait()
         proc = SimpleNamespace(pid=123456, returncode=None, stdout=Stream(), stderr=Stream(), wait=AsyncMock(return_value=0))
         ad = AgyAdapter(Role('architect', 'agy'), orch.project, orch.bus, None, None, '', reviewer=True)
-        ad._system_sent = False; ad._sock = ''; ad._token = ''; ad._stderr = deque()
+        ad._system_sent = False; ad._sock = ''; ad._bridge = ''; ad._token = ''; ad._stderr = deque()
         ad._argv = lambda prompt: ['mock-agy']
         monkeypatch.setattr('duet.adapters.agy.asyncio.create_subprocess_exec', AsyncMock(return_value=proc))
         signals = []
-        monkeypatch.setattr('duet.adapters.agy.os.killpg', lambda pid, sig: signals.append((pid, sig, ad.busy)))
+        monkeypatch.setattr('duet.adapters.agy.interrupt_tree', lambda pid: signals.append((pid, 'interrupt', ad.busy)))
+        monkeypatch.setattr('duet.adapters.agy.kill_tree', lambda pid: signals.append((pid, 'kill', ad.busy)))
         orch.reviewer = ad
         with pytest.raises(asyncio.TimeoutError): await orch._review_turn(ad, 'old', .01)
-        assert signals[0] == (proc.pid, signal.SIGINT, True)
+        assert signals[0] == (proc.pid, 'interrupt', True)
         proc.wait.assert_awaited()
-        assert any(sig == signal.SIGKILL for _, sig, _ in signals)
+        assert any(sig == 'kill' for _, sig, _ in signals)
         assert ad.proc is None and orch.reviewer is None
     asyncio.run(run())

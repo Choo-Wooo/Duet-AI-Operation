@@ -127,14 +127,17 @@ def test_full_command_cache(policy):
     "sub/.env.local", "secrets/a", "sub/secrets/a", ".GIT/config", "x/../key.PEM",
 ])
 def test_protected_paths_and_cache(tmp_path, source, path):
-    conf = DEFAULT_POLICY if source == "default" else yaml.safe_load(
-        (Path(__file__).resolve().parents[2] / ".duet/policy.yaml").read_text())
+    project_policy = Path(__file__).resolve().parents[2] / ".duet/policy.yaml"
+    if source == "project" and not project_policy.exists():
+        pytest.skip("duet 을 넣은 프로젝트의 .duet/policy.yaml 이 없습니다")
+    conf = DEFAULT_POLICY if source == "default" else yaml.safe_load(project_policy.read_text(encoding="utf-8"))
     pol = Policy(tmp_path, conf, "architect")
     req = ApprovalRequest("implementer", "file", path, paths=[path])
     pol.remember(req)
     assert pol.classify(req, ROLES[1])[0] == HUMAN
 
 
+@pytest.mark.symlink
 def test_resolved_paths_and_readonly_writable(policy, tmp_path):
     (tmp_path / "secrets").mkdir()
     (tmp_path / "alias").symlink_to(tmp_path / "secrets", target_is_directory=True)
