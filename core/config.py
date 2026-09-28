@@ -185,6 +185,10 @@ class Config:
                                "integration_test": "",
                                # 병렬 작업 테스트 시간 한도(초)
                                "work_test_timeout": 900,
+                               # 병렬 작업: 계획 합의 직후 구현 전 상태에서 합의 테스트를 한 번 돌려 원래부터 실패하는 테스트를 구분
+                               "work_baseline_test": True,
+                               # 대화 압축 시간 한도(초). 넘기면 실패로 보고 진행을 계속한다
+                               "compact_timeout_sec": 300,
                                # 전권 자동 수락: 모드와 상관없이 승인·선택을 사람에게 묻지 않음 (autopilot_deny 만 막음)
                                "full_auto": False}
         self.runtime: dict = {}  # 이번 실행에만 쓰는 값 (예산 등, 저장 안 함)

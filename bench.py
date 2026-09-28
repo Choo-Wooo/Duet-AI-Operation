@@ -204,6 +204,8 @@ async def run_bench(cfg: Config, bus: EventBus, msgs: list[str], fake: bool, tas
                     log=print) -> dict:
     project = cfg.project
     started = time.time()
+    # 벤치 컨테이너 안에서는 Codex 자체 샌드박스(bubblewrap)가 동작하지 않는다. 명령은 duet 정책으로 거른다
+    os.environ.setdefault("DUET_CODEX_SANDBOX", "off")
     base = head_commit(project)
     if parallel is not None:
         cfg.settings["max_parallel"] = max(1, int(parallel))

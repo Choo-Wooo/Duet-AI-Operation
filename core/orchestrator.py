@@ -787,6 +787,7 @@ class Orchestrator:
             self.notice(f"{name} {why} 대화를 압축합니다.", "warn" if over else "info", role=name)
             self.running_role = name
             self.emit_status()
+            ad.compact_timeout = float(self.cfg.settings.get("compact_timeout_sec") or 300)
             try:
                 ok = await ad.compact(compact_instructions(self.cfg, self.cfg.roles[name]))
             finally:

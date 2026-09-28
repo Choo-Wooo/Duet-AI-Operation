@@ -37,6 +37,8 @@ SETTINGS: dict[str, tuple[Any, Any, str]] = {
     "auto_merge": (bool, None, "ACCEPT + 통합 테스트 통과 시 자동 병합 (끄면 사람 승인)"),
     "integration_test": (str, None, "병합 전 통합 테스트 명령 (비우면 작업별 test_command)"),
     "work_test_timeout": (int, lambda v: 10 <= v <= 86400, "병렬 작업 테스트 시간 한도(초)"),
+    "work_baseline_test": (bool, None, "합의 직후 구현 전 상태에서 합의 테스트를 돌려 원래부터 실패하는 테스트 구분"),
+    "compact_timeout_sec": (int, lambda v: 30 <= v <= 3600, "대화 압축 시간 한도(초). 넘기면 실패로 보고 계속 진행"),
     "plan_rounds": (int, lambda v: v >= 1, "계획 합의 라운드 한도"),
     "plan_approval": (str, lambda v: v in ("architect", "human"), "계획 최종 승인: architect | human"),
     "checkpoint_every": (int, lambda v: v >= 0, "체크포인트 간격(턴, 0=끔)"),

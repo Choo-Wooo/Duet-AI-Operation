@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from .agreement import parse_plan
+from .agreement import clean_command, parse_plan
 from .dialogue import extract_directives
 from .policy import ApprovalRequest, Decision, Policy, AUTO, read_only_decision
 from .procs import close_transport, create_shell, kill_tree
@@ -59,6 +59,8 @@ WORK_SYSTEM = BACKGROUND_WAIT + """
 ## 계획 형식 (plan 단계)
 이해한 요구, 설계와 다른 점과 이유, ```files 코드블록(한 줄에 파일 하나, 이 워크트리 기준 상대 경로), AC(수용 기준),
 테스트↔AC 매핑(모의/실제 구분), `test_command: <한 줄>` (이 워크트리에서 실행), 다른 작업과의 인터페이스, 열린 질문.
+- test_command 는 백틱 없이 셸 명령 그대로 한 줄로 쓰고, 이 작업과 관련된 테스트로 좁히세요.
+  구현 전에도 실패하는 테스트(브라우저·네트워크·권한이 필요한 것 등)는 넣지 마세요. duet 이 합의 직후 구현 전 상태에서 한 번 돌려 봅니다.
 """
 
 ARCH_WORK_SYSTEM = BACKGROUND_WAIT + """
@@ -68,6 +70,8 @@ ARCH_WORK_SYSTEM = BACKGROUND_WAIT + """
 DIALOGUE.md 는 쓰지 마세요. 응답은 duet 이 docs/work/{id}.md 에 기록합니다.
 - plan_review: `<!-- duet: AGREE -->` 또는 `<!-- duet: REVISE <수정 요청> -->`
 - verify: `<!-- duet: ACCEPT -->` 또는 `<!-- duet: REWORK <재작업 사유> -->`
+  (합의 테스트가 구현 전에도 실패했고 남은 실패가 모두 그때부터 있던 것이면 `<!-- duet: ACCEPT baseline -->`)
+지시문은 반드시 위 HTML 주석 형식으로 쓰세요. 본문에 "AGREE" 라고만 쓰면 인식되지 않을 수 있습니다.
 - 질문 응답: 지시문 없이 답만
 사람 판단이 필요하면 `<!-- duet: ASK_HUMAN <질문> -->`.
 """
@@ -123,10 +127,36 @@ class WorkItem:
     updated: float = field(default_factory=time.time)
     inbox: list[str] = field(default_factory=list)  # 사람이 이 작업에 보낸 메시지 (다음 턴에 전달)
     resume_at: str = ""  # 재개 시 바로 들어갈 단계 (verify / merging)
+    baseline_code: int | None = None  # 합의 직후(구현 전) 같은 test_command 의 종료 코드
+    baseline_out: str = ""
+    baseline_waived: bool = False  # 설계자가 "남은 실패는 구현 전부터 있던 것" 으로 확인함
 
     @property
     def thread(self) -> str:
         return f"docs/work/{self.id}.md"
+
+
+_PLAIN = re.compile(r"^[\s>*_#`-]*(AGREE|REVISE|ACCEPT|REWORK)\b[\s*_`:.-]*(.*)$", re.I)
+
+
+def plain_directives(text: str, allowed: tuple[str, ...]) -> list[tuple[str, str]]:
+    """지시문(HTML 주석)을 빠뜨리고 본문 첫 줄에 "AGREE v1" 처럼만 쓴 응답을 인식한다.
+
+    첫 비어 있지 않은 줄 하나만 본다 (본문 중간의 단어에 반응하지 않도록).
+    """
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        m = _PLAIN.match(line.strip())
+        if m and m.group(1).upper() in allowed:
+            arg = m.group(2).strip().strip("*_`").strip()
+            name = m.group(1).upper()
+            if name in ("AGREE", "ACCEPT"):
+                first = arg.split()[0].strip("*_`.,:;()[]") if arg.split() else ""
+                arg = first if re.fullmatch(r"v\d+|baseline", first, re.I) else ""
+            return [(name, arg)]
+        return []
+    return []
 
 
 def parse_work_block(text: str | None) -> list[dict] | None:
@@ -185,6 +215,7 @@ class WorkBoard:
                 it = WorkItem(**{k: v for k, v in d.items() if k in WorkItem.__dataclass_fields__})
             except TypeError:
                 continue
+            it.test_command = clean_command(it.test_command)  # 예전에 백틱째 저장된 명령 정리
             if it.status in ACTIVE and it.status != "queued":
                 it.wait_reason = f"duet 재시작으로 {it.status} 단계에서 멈춤 — RESUME_WORK {it.id} 로 재개"
                 it.status = "waiting:" + it.status
@@ -623,10 +654,13 @@ class WorkBoard:
                 "요구 해석, 설계와의 차이, 파일 범위(다른 작업과 겹치지 않는지), AC, 테스트가 AC 를 검증하는지 보세요. "
                 "AGREE 또는 REVISE <수정 요청>.", "설계자")
             self._check_ask(rdirs, "plan_review")
+            if not any(k in ("AGREE", "REVISE") for k, _ in rdirs):
+                rdirs = rdirs + plain_directives(rfull, ("AGREE", "REVISE"))
             rev = next((v for k, v in rdirs if k == "REVISE"), None)
             if any(k == "AGREE" for k, _ in rdirs) and rev is None:
                 it.agreed_files, it.test_command = files, command
                 self._thread(it, "duet", f"계획 v{it.plan_version} 합의 · 파일 {', '.join(files)} · test_command: {command}")
+                await self._baseline(it, path)
                 return
             if it.rounds >= limit:
                 choice = await self.orch.ui.ask_choice(
@@ -634,11 +668,26 @@ class WorkBoard:
                     [("more", "한 라운드 더"), ("agree", "이 계획으로 진행"), ("wait", "보류")])
                 if choice == "agree":
                     it.agreed_files, it.test_command = files, command
+                    await self._baseline(it, path)
                     return
                 if choice != "more":
                     raise _Wait("plan_review", "계획 합의 라운드 한도 — 사람 보류")
                 limit += 1
             feedback = rev or "설계자가 AGREE 하지 않았습니다. 응답을 읽고 계획을 고치세요."
+
+    async def _baseline(self, it: WorkItem, path: Path) -> None:
+        """합의 직후, 구현 전 상태에서 합의 테스트를 한 번 돌려 둔다 (원래부터 실패하는 테스트 구분용)."""
+        if not self.cfg.settings.get("work_baseline_test", True):
+            return
+        code, out = await self._run_test(it, path, it.test_command)
+        it.baseline_code, it.baseline_out = code, out[-2500:]
+        if code == 0:
+            self._thread(it, "duet · 구현 전 테스트", f"$ {it.test_command}\nexit 0 (구현 전에도 통과)")
+        else:
+            self._thread(it, "duet · 구현 전 테스트",
+                         f"$ {it.test_command}\nexit {code} — 구현 전에도 실패합니다. 새로 만들 테스트가 아직 없어서일 수도 있고, "
+                         f"원래부터 실패하는 테스트일 수도 있습니다. 검증 때 이 결과와 비교합니다.\n```\n{out[-1500:]}\n```")
+        self.save()
 
     async def _implement_loop(self, it: WorkItem, path: Path) -> None:
         note = "계획이 합의되었습니다. 구현하세요."
@@ -700,6 +749,7 @@ class WorkBoard:
                 it.reworks = 0
 
     async def _run_test(self, it: WorkItem, path: Path, command: str) -> tuple[int, str]:
+        command = clean_command(command)
         label = f'duet#{it.id}'
         self.orch.bus.emit('turn_start', label, kind='work_test', info=it.id)
         try:
@@ -746,6 +796,12 @@ class WorkBoard:
         self._touch(it, "verify")
         code, out = await self._run_test(it, path, it.test_command)
         self._thread(it, "duet · 테스트", f"$ {it.test_command}\nexit {code}\n```\n{out[-2000:]}\n```")
+        baseline_failed = bool(it.baseline_code)
+        base_note = ""
+        if code != 0 and baseline_failed:
+            base_note = (f"\n참고: 같은 명령이 구현 전(합의 직후)에도 exit {it.baseline_code} 로 실패했습니다. 구현 전 출력 끝부분:\n"
+                         f"```\n{it.baseline_out[-1500:]}\n```\n두 출력을 비교해, 남은 실패가 모두 구현 전부터 있던 것(이번 작업과 무관)이면 "
+                         "`<!-- duet: ACCEPT baseline -->`, 이번 작업의 요구·새 테스트가 실패하거나 새로 깨진 테스트가 있으면 REWORK 하세요.\n")
         changed = await asyncio.to_thread(self.wt.changed_files, path, self.base)
         outside = [p for p in changed if p not in it.agreed_files]
         stat = await asyncio.to_thread(self.wt.diff_stat, path, self.base)
@@ -754,16 +810,27 @@ class WorkBoard:
             arch, it, "work_verify",
             f"[duet] 병렬 작업 {it.id} 검증\n작업자 보고:\n{report[-3000:]}\n\n"
             f"변경 요약 (기준 {self.base} 대비):\n{stat}\n계획 밖 변경: {', '.join(outside) or '없음'}\n\n"
-            f"duet 이 합의 테스트를 실행했습니다: `{it.test_command}` → exit {code}\n```\n{out[-2500:]}\n```\n"
+            f"duet 이 합의 테스트를 실행했습니다: `{it.test_command}` → exit {code}\n```\n{out[-2500:]}\n```\n{base_note}"
             f"워크트리 {path.relative_to(self.project).as_posix()} 에서 코드를 직접 읽고 AC 충족·테스트의 타당성을 검토하세요. "
             "ACCEPT 또는 REWORK <사유>.", "설계자")
         self._check_ask(dirs, "verify")
+        if not any(k in ("ACCEPT", "REWORK") for k, _ in dirs):
+            dirs = dirs + plain_directives(full, ("ACCEPT", "REWORK"))
         rework = next((v for k, v in dirs if k == "REWORK"), None)
         if rework is not None:
             return rework or "설계자가 재작업을 요청했습니다."
-        if any(k == "ACCEPT" for k, _ in dirs):
+        accept = next((v for k, v in dirs if k == "ACCEPT"), None)
+        if accept is not None:
             if code != 0:
-                return f"합의 테스트가 실패했습니다 (exit {code}). 설계자 ACCEPT 에도 테스트 통과가 필요합니다.\n{out[-1500:]}"
+                if baseline_failed and accept.strip().lower().startswith("baseline"):
+                    it.baseline_waived = True
+                    self._thread(it, "duet", f"설계자가 남은 실패(exit {code})를 구현 전부터 있던 것으로 확인해 통과로 처리합니다.")
+                else:
+                    return (f"합의 테스트가 실패했습니다 (exit {code}). 설계자 ACCEPT 에도 테스트 통과가 필요합니다"
+                            + (" (구현 전부터 있던 실패뿐이면 설계자가 ACCEPT baseline 으로 확인)" if baseline_failed else "")
+                            + f".\n{out[-1500:]}")
+            else:
+                it.baseline_waived = False
             it.result = full.strip().splitlines()[0][:200] if full.strip() else ""
             return None
         return "설계자가 ACCEPT/REWORK 를 내지 않았습니다. 보고를 보완하세요."
@@ -781,8 +848,10 @@ class WorkBoard:
             integ = (self.cfg.settings.get("integration_test") or "").strip() or it.test_command
             code, out = await self._run_test(it, path, integ)
             self._thread(it, "duet · 통합 테스트", f"$ {integ}\nexit {code}\n```\n{out[-2000:]}\n```")
-            if code != 0:
+            if code != 0 and not (it.baseline_waived and integ == it.test_command):
                 return f"기준 브랜치와 합친 뒤 통합 테스트가 실패했습니다 (`{integ}`, exit {code}):\n{out[-1500:]}"
+            if code != 0:
+                self._thread(it, "duet", "통합 테스트의 남은 실패는 설계자가 구현 전부터 있던 것으로 확인했습니다. 병합을 계속합니다.")
             if not self.cfg.settings.get("auto_merge", True):
                 stat = await asyncio.to_thread(self.wt.diff_stat, path, self.base)
                 c = await self.orch.ui.ask_choice(f"[{it.id}] 기준 브랜치 {self.base} 에 병합할까요?", stat,

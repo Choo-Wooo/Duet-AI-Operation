@@ -49,6 +49,7 @@ class AgentAdapter(ABC):
         self.context_tokens = 0  # 마지막으로 관측한 세션 컨텍스트 크기(토큰)
         self.handoff: str | None = None  # 세션 교체 직후 첫 턴에 붙일 안내
         self.context_limit = 0  # 0 이 아니면 CLI 자체 자동 압축 기준으로도 전달 (Codex)
+        self.compact_timeout = 300.0  # 압축이 이 시간(초) 안에 끝나지 않으면 실패로 보고 진행을 풀어 준다
 
     def recovery_prompt(self, prompt: str) -> str:
         if self.handoff:

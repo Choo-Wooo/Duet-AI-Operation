@@ -122,6 +122,21 @@ def record_plan(project: Path, task: dict, response: str, deviation: bool = Fals
     return version
 
 
+def clean_command(command: str) -> str:
+    """계획의 test_command 에서 마크다운 표기(`명령`, ```명령```)를 벗긴다.
+
+    그대로 두면 셸이 백틱을 명령 치환으로 실행해 엉뚱한 명령이 돈다 (exit 127 등).
+    """
+    c = (command or "").strip()
+    for _ in range(3):
+        m = (re.fullmatch(r"```(?:(?:sh|bash|shell|zsh|console)\s+)?(.*?)```", c, re.S)
+             or re.fullmatch(r"``?([^`]*)``?", c))
+        if not m or not m.group(1).strip():
+            break
+        c = m.group(1).strip()
+    return c
+
+
 def parse_plan(text: str) -> tuple[list[str], str]:
     # canonical fenced `files` block; only one block and one top-level command.
     blocks = []
@@ -150,7 +165,10 @@ def parse_plan(text: str) -> tuple[list[str], str]:
     commands = re.findall(r"^test_command:[ \t]*(.*)$", control_text(text), re.M)
     if len(commands) != 1 or not commands[0].strip():
         raise ValueError("test_command 한 줄이 없거나 여러 개입니다")
-    return list(dict.fromkeys(files)), commands[0].strip()
+    command = clean_command(commands[0])
+    if not command:
+        raise ValueError("test_command 한 줄이 없거나 여러 개입니다")
+    return list(dict.fromkeys(files)), command
 
 
 def fingerprint(project: Path, exclude: list[str] | None = None) -> tuple[dict[str, str], list[str]]:
