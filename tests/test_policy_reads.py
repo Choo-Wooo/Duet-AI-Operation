@@ -52,3 +52,18 @@ def test_verify_allows_agreed_command_trimmed_and_reads():
 
 def test_split_respects_quotes():
     assert split_commands('grep "a|b" f | head') == ['grep "a|b" f', "head"]
+
+
+def test_designer_real_read_commands_in_plan():
+    """MineCraft 디자이너가 계획 단계에서 막혔던 실제 읽기 명령들."""
+    from duet.core.policy import read_only_command
+    ok = [
+        'R=/Users/mac/Workspace/x; cd $R/minecraft-assets; sed -n 120,400p "마인크래프트 에셋 목록.md"; echo ---; ls items/classes skins/classes',
+        'R=/x; unzip -l "$R/스킨.zip" | grep -iE "json|mcmeta|resourcepack" | head -40; echo ---; find $R/server/kubejs/assets | head -40',
+        'ls ~/Library/Application\\ Support/minecraft/versions 2>/dev/null; ls /x/server | head -30',
+        'tar tzf a.tgz | head', 'sips -g pixelWidth -g pixelHeight a.png', 'shasum -a 256 a.png', 'zipinfo a.zip',
+    ]
+    bad = ['unzip a.zip', 'unzip -o a.zip -d out', 'tar xzf a.tgz', 'sips -z 64 64 a.png', 'PATH=/tmp/e; ls',
+           'PAGER=./evil git show', 'ls \\x', 'R=$(rm -rf x); ls']
+    assert all(read_only_command(c) for c in ok), [c for c in ok if not read_only_command(c)]
+    assert not any(read_only_command(c) for c in bad), [c for c in bad if read_only_command(c)]

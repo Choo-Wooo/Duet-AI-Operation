@@ -12,6 +12,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .procs import WINDOWS, hidden_kwargs
+
 HOME = Path.home()
 EXTRA_DIRS = [
     HOME / ".local" / "bin",
@@ -22,12 +24,36 @@ EXTRA_DIRS = [
     Path("/opt/homebrew/bin"),
     Path("/usr/local/bin"),
 ]
+if WINDOWS:
+    _local = Path(os.environ.get("LOCALAPPDATA") or HOME / "AppData" / "Local")
+    _roaming = Path(os.environ.get("APPDATA") or HOME / "AppData" / "Roaming")
+    EXTRA_DIRS = [
+        HOME / ".local" / "bin",              # claude 네이티브 설치 (claude.exe)
+        HOME / ".claude" / "local",
+        _roaming / "npm",                     # npm i -g (claude.cmd, codex.cmd)
+        HOME / ".bun" / "bin",
+        HOME / ".volta" / "bin",
+        _local / "Volta" / "bin",
+        _local / "agy" / "bin",               # Antigravity CLI
+        _local / "Programs" / "OpenAI" / "Codex" / "bin",
+        Path(os.environ.get("ProgramFiles") or "C:/Program Files") / "nodejs",
+    ]
+
+
+def _exe_names(name: str) -> list[str]:
+    """Windows 는 확장자(.exe/.cmd …)가 붙은 실행 파일을 찾는다. .exe 를 가장 먼저."""
+    if not WINDOWS:
+        return [name]
+    exts = [e.lower() for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    order = [".exe"] + [e for e in (".cmd", ".bat", ".com") if e in exts or e == ".cmd"]
+    return [name + e for e in order]
 
 
 def _version_of(path: str) -> tuple[tuple[int, ...], str]:
     try:
-        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20)
-        text = (out.stdout or out.stderr).strip()
+        out = subprocess.run([path, "--version"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                             **hidden_kwargs())
+        text = (out.stdout or out.stderr).decode("utf-8", "replace").strip()
     except Exception:
         return (), ""
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
@@ -37,23 +63,34 @@ def _version_of(path: str) -> tuple[tuple[int, ...], str]:
 def candidates(name: str) -> list[str]:
     found: list[str] = []
     for d in os.environ.get("PATH", "").split(os.pathsep) + [str(p) for p in EXTRA_DIRS]:
-        p = Path(d) / name
-        if p.is_file() and os.access(p, os.X_OK):
-            rp = str(p)
-            if rp not in found:
-                found.append(rp)
+        if not d:
+            continue
+        for exe in _exe_names(name):
+            p = Path(d) / exe
+            if p.is_file() and os.access(p, os.X_OK):
+                rp = str(p)
+                if rp not in found:
+                    found.append(rp)
     # nvm 설치본
     nvm = HOME / ".nvm" / "versions" / "node"
     if nvm.is_dir():
         for p in sorted(nvm.glob(f"*/bin/{name}")):
             if str(p) not in found:
                 found.append(str(p))
+    nvm_win = os.environ.get("NVM_HOME")  # nvm-windows
+    if WINDOWS and nvm_win and Path(nvm_win).is_dir():
+        for exe in _exe_names(name):
+            for p in sorted(Path(nvm_win).glob(f"*/{exe}")):
+                if str(p) not in found:
+                    found.append(str(p))
     if name == "claude":
         try:  # claude-agent-sdk 에 들어 있는 CLI 도 후보 (최후 수단)
             import claude_agent_sdk
-            b = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-            if b.is_file():
-                found.append(str(b))
+            for exe in _exe_names("claude"):
+                b = Path(claude_agent_sdk.__file__).parent / "_bundled" / exe
+                if b.is_file():
+                    found.append(str(b))
+                    break
         except Exception:
             pass
     return found

@@ -12,6 +12,7 @@ from typing import Any
 
 from .. import __version__
 from ..core.clis import which
+from ..core.procs import group_kwargs, reap
 from ..core.policy import ApprovalRequest, Decision
 from ..core.prompts import REVIEW_SYSTEM
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
@@ -45,7 +46,7 @@ class CodexAdapter(AgentAdapter):
         self.proc = await asyncio.create_subprocess_exec(
             exe, "app-server",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.project), limit=64 * 1024 * 1024, env=os.environ.copy(),
+            cwd=str(self.project), limit=64 * 1024 * 1024, env=os.environ.copy(), **group_kwargs(),
         )
         self._reader = asyncio.create_task(self._read_loop())
         self._err_reader = asyncio.create_task(self._read_stderr())
@@ -77,13 +78,24 @@ class CodexAdapter(AgentAdapter):
         res = await self.request("thread/start", params)
         self.session_id = res["thread"]["id"]
 
+    @staticmethod
+    def sandbox_off() -> bool:
+        """Codex 자체 샌드박스를 끌지 (DUET_CODEX_SANDBOX=off).
+
+        Codex 샌드박스(리눅스 bubblewrap)는 Docker 같은 컨테이너 안에서 네임스페이스를 만들지 못해
+        읽기 명령조차 실패한다. 컨테이너에서는 끄고, 명령은 duet 권한 정책(승인 요청)으로만 거른다.
+        """
+        return os.environ.get("DUET_CODEX_SANDBOX", "").strip().lower() in ("off", "0", "false", "none",
+                                                                           "danger-full-access")
+
     def _thread_params(self) -> dict:
         read_only = self.reviewer or self.role.permissions == "read_only"
         p: dict[str, Any] = {
             "cwd": str(self.project),
-            "sandbox": "read-only" if read_only else "workspace-write",
+            "sandbox": ("danger-full-access" if self.sandbox_off()
+                        else "read-only" if read_only else "workspace-write"),
             # untrusted: 신뢰 목록 밖의 명령은 실행 전에 승인 요청 → duet 정책으로 라우팅
-            "approvalPolicy": "never" if self.reviewer else "untrusted",
+            "approvalPolicy": "untrusted" if self.sandbox_off() or not self.reviewer else "never",
             "developerInstructions": REVIEW_SYSTEM if self.reviewer else self.system_append,
         }
         if self.role.model:
@@ -273,7 +285,11 @@ class CodexAdapter(AgentAdapter):
         try:
             params: dict[str, Any] = {"threadId": self.session_id,
                                       "input": [{"type": "text", "text": prompt, "text_elements": []}]}
-            if self.plan_read_only:
+            if self.sandbox_off():
+                # 샌드박스 없이: 신뢰 목록 밖의 명령·파일 변경은 모두 승인 요청 → duet 정책이 단계(plan 읽기 전용 등)에 맞게 판정
+                params["sandboxPolicy"] = {"type": "dangerFullAccess"}
+                params["approvalPolicy"] = "untrusted"  # 심사 세션도: 샌드박스가 없으니 신뢰 밖 명령은 막는다
+            elif self.plan_read_only:
                 params["sandboxPolicy"] = {"type": "readOnly", "networkAccess": False}
                 params["approvalPolicy"] = "never"
             elif self.agreement_phase or getattr(self, "_agreement_sandbox_used", False):
@@ -325,7 +341,7 @@ class CodexAdapter(AgentAdapter):
         self._compact_fut = asyncio.get_running_loop().create_future()
         try:
             await self.request("thread/compact/start", {"threadId": self.session_id})
-            ok = await asyncio.wait_for(self._compact_fut, 300)
+            ok = await asyncio.wait_for(self._compact_fut, self.compact_timeout)
         except Exception:
             ok = False
         finally:
@@ -351,7 +367,9 @@ class CodexAdapter(AgentAdapter):
                 self.proc.stdin.close()  # type: ignore[union-attr]
                 await asyncio.wait_for(self.proc.wait(), 3)
             except Exception:
-                self.proc.kill()
+                pass
+        if self.proc:
+            await reap(self.proc)  # 자손(MCP 서버·명령)까지 정리하고 파이프를 닫는다
         for t in (getattr(self, "_reader", None), getattr(self, "_err_reader", None)):
             if t:
                 t.cancel()

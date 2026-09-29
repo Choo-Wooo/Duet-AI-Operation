@@ -22,6 +22,7 @@ from aiohttp import WSMsgType, web
 from .. import commands
 from ..core.config import PERMISSION_PROFILES, ROLE_PRESETS, SUPPORTED_CLIS, Config, Role, preset_role, presets_info, validate_role_name
 from ..core.events import Event, EventBus
+from ..core.fsutil import is_link
 from ..core.models import read_cache, refresh
 from ..core.orchestrator import Orchestrator
 from ..core.policy import ApprovalRequest, Decision, read_only_decision
@@ -36,6 +37,8 @@ SETTINGS: dict[str, tuple[Any, Any, str]] = {
     "auto_merge": (bool, None, "ACCEPT + 통합 테스트 통과 시 자동 병합 (끄면 사람 승인)"),
     "integration_test": (str, None, "병합 전 통합 테스트 명령 (비우면 작업별 test_command)"),
     "work_test_timeout": (int, lambda v: 10 <= v <= 86400, "병렬 작업 테스트 시간 한도(초)"),
+    "work_baseline_test": (bool, None, "합의 직후 구현 전 상태에서 합의 테스트를 돌려 원래부터 실패하는 테스트 구분"),
+    "compact_timeout_sec": (int, lambda v: 30 <= v <= 3600, "대화 압축 시간 한도(초). 넘기면 실패로 보고 계속 진행"),
     "plan_rounds": (int, lambda v: v >= 1, "계획 합의 라운드 한도"),
     "plan_approval": (str, lambda v: v in ("architect", "human"), "계획 최종 승인: architect | human"),
     "checkpoint_every": (int, lambda v: v >= 0, "체크포인트 간격(턴, 0=끔)"),
@@ -106,7 +109,7 @@ class WebUI:
             self._broadcast({"type": "resolved", "id": rid})
 
     def _notify_desktop(self, kind: str, payload: dict) -> None:
-        """브라우저 탭이 없으면 macOS 알림으로라도 알린다."""
+        """브라우저 탭이 없으면 데스크톱 알림(macOS 알림 센터 / Windows 풍선 알림)으로라도 알린다."""
         if self.clients or os.environ.get("DUET_NO_NOTIFY"):
             return
         try:
@@ -117,6 +120,17 @@ class WebUI:
                 text = (payload.get("summary") or payload.get("title") or "")[:120].replace('"', "'")
                 subprocess.Popen(["osascript", "-e", f'display notification "{text}" with title "{title}"'],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif os.name == "nt":
+                title = "duet 승인 요청" if kind == "approval" else "duet 선택 요청"
+                text = (payload.get("summary") or payload.get("title") or "")[:120]
+                ps_str = lambda s: "'" + s.replace("'", "''") + "'"
+                script = ("Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; "
+                          "$n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; "
+                          f"$n.Visible = $true; $n.ShowBalloonTip(8000, {ps_str(title)}, {ps_str(text or title)}, 'Info'); "
+                          "Start-Sleep -Seconds 9; $n.Dispose()")
+                subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception:
             pass
 
@@ -430,7 +444,7 @@ def _doc_path(root: Path, raw: str) -> Path:
     parent = root
     for part in path.parts[:-1]:
         parent = parent / part
-        if parent.is_symlink():
+        if is_link(parent):
             raise ValueError('심볼릭 링크 디렉터리는 문서 목록에서 제외됩니다')
     target = (root / path).resolve()
     if not target.is_relative_to(root.resolve()):
@@ -450,7 +464,7 @@ def _docs(root: Path) -> list[dict]:
     rows = []
     for base, dirs, files in os.walk(root, followlinks=False):
         rel = Path(base).relative_to(root)
-        dirs[:] = [d for d in dirs if not (Path(base)/d).is_symlink() and
+        dirs[:] = [d for d in dirs if not is_link(Path(base)/d) and
                    (_doc_visible((rel/d/'file.md').parts) or (rel == Path('.') and d == '.duet'))]
         for name in files:
             raw = (rel/name).as_posix()
@@ -590,11 +604,17 @@ async def serve(cfg: Config, bus: EventBus, msgs: list[str], fake: bool, first: 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     import signal
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+        if sig is None:
+            continue
         try:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):
-            pass
+            # Windows: 이벤트 루프 신호 처리기가 없어 일반 신호 처리기로 종료를 알린다
+            try:
+                signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
+            except (ValueError, OSError, RuntimeError):
+                pass
     try:
         await stop.wait()
     finally:

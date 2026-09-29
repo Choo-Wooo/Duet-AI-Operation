@@ -21,6 +21,7 @@ from pathlib import Path
 from .core.config import Config
 from .core.events import Event, EventBus
 from .core.policy import ApprovalRequest, Decision, read_only_decision
+from .core.procs import WINDOWS, terminate_tree
 from .core.prompts import ASK_SYSTEM, COMPACT_ASK
 
 DIM, BOLD, CYAN, RED, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[31m", "\033[0m"
@@ -42,6 +43,12 @@ def launch_window(duet_dir: Path, project: Path, role: str) -> str:
     cmd = (f"cd {shlex.quote(str(project))} && DUET_ASK_WINDOW=1 exec {shlex.quote(sys.executable)} "
            f"{shlex.quote(str(duet_dir))} --no-venv --ask {shlex.quote(role)}")
     try:
+        if WINDOWS:
+            # 새 콘솔 창에서 실행한다. 프로세스가 끝나면 창도 닫힌다
+            env = {**os.environ, "DUET_ASK_WINDOW": "1", "PYTHONUTF8": "1"}
+            subprocess.Popen([sys.executable, str(duet_dir), "--no-venv", "--ask", role], cwd=str(project), env=env,
+                             creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP)
+            return f"새 창에서 {role} 질문 콘솔을 열었습니다. 창에서 /quit 하면 닫힙니다."
         if sys.platform == "darwin":
             if os.environ.get("TERM_PROGRAM") == "iTerm.app":
                 script = (f'tell application "iTerm" to create window with default profile command '
@@ -90,8 +97,11 @@ def stop_all(project: Path) -> int:
     d = project / ".duet" / "asks"
     for pid_file in d.glob("*.pid") if d.exists() else []:
         try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, signal.SIGTERM)
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            if WINDOWS:
+                terminate_tree(pid)  # 창의 파이썬과 그 안의 CLI 까지
+            else:
+                os.kill(pid, signal.SIGTERM)
             n += 1
         except (ValueError, ProcessLookupError, PermissionError, OSError):
             pass
@@ -151,11 +161,13 @@ async def run_ask(cfg: Config, role_name: str | None = None, fake: bool = False)
         return 2
     project = cfg.project
     pid_file = _asks_dir(project) / f"{os.getpid()}.pid"
-    pid_file.write_text(str(os.getpid()))
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
     transcript = _asks_dir(project) / f"{time.strftime('%Y%m%d-%H%M%S')}-{role_name}.md"
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is None:  # Windows 에는 SIGHUP 이 없다
+            continue
         try:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):

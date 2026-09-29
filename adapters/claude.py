@@ -228,7 +228,9 @@ class ClaudeAdapter(AgentAdapter):
         if not self.client or self.reviewer:
             return False
         ok = True
-        try:
+
+        async def run() -> None:
+            nonlocal ok
             await self.client.query(("/compact " + " ".join(instructions.split())).strip())
             async for msg in self.client.receive_response():
                 if isinstance(msg, ResultMessage):
@@ -237,6 +239,16 @@ class ClaudeAdapter(AgentAdapter):
                         ok = False
                     if msg.total_cost_usd is not None:
                         self._cost_total = msg.total_cost_usd
+
+        try:
+            # 압축이 끝나지 않으면 세션을 붙잡고 있지 않도록 시간 제한을 둔다 (실패로 처리 → 호출 쪽이 교체·계속 판단)
+            await asyncio.wait_for(run(), self.compact_timeout)
+        except asyncio.TimeoutError:
+            ok = False
+            try:
+                await self.client.interrupt()
+            except Exception:
+                pass
         except Exception:
             ok = False
         if ok:

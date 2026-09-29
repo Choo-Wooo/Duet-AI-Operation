@@ -321,6 +321,7 @@ def test_git_head_mismatch_warns_without_restoring_code(orch, monkeypatch):
     assert any("/rollback" in e.data.get("text", "") for e in orch.events)
 
 
+@pytest.mark.symlink
 def test_symlink_save_paths_rejected(orch, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()

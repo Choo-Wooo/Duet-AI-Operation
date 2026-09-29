@@ -11,6 +11,8 @@ import logging
 from contextlib import contextmanager
 from pathlib import Path
 
+from .procs import run_text
+
 DIALOGUE_PREFIXES = ("DIALOGUE.md", "DIALOGUE-archive/")
 
 
@@ -34,8 +36,8 @@ class Git:
 
     def _run(self, *args: str, check: bool = False, env: dict | None = None,
              input: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *self._ident, *args], cwd=self.project, capture_output=True, text=True,
-                              check=check, env={**os.environ, **(env or {})}, input=input)
+        return run_text(["git", *self._ident, *args], cwd=self.project, check=check,
+                        env={**os.environ, **(env or {})}, input=input)
 
     def commit_scoped(self, message: str, *, extra_parent: str | None = None,
                       allow_empty: bool = False) -> str | None:

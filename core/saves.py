@@ -16,6 +16,7 @@ import yaml
 from .. import __version__
 from .config import Config, State
 from .agreement import validate_task
+from .procs import run_text
 
 NAME_RE = re.compile(r"[A-Za-z0-9가-힣_.-]{1,64}")
 
@@ -31,8 +32,7 @@ def save_path(cfg: Config, name: str) -> Path:
 
 def git_head(project: Path) -> str | None:
     try:
-        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project,
-                           capture_output=True, text=True, timeout=5)
+        r = run_text(["git", "rev-parse", "HEAD"], cwd=project, timeout=5)
         return r.stdout.strip() if r.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -76,7 +76,7 @@ def write_save(cfg: Config, name: str, *, note: str = "", force: bool = False,
         "last_n": cfg.state.last_n, "mode": cfg.state.mode, "git_head": git_head(cfg.project),
         "roles": {n: {"cli": r.cli, "model": r.model} for n, r in cfg.roles.items()},
         "duet_version": __version__, "autosave": autosave,
-        "archives": sorted(str(p.relative_to(cfg.project))
+        "archives": sorted(p.relative_to(cfg.project).as_posix()
                            for p in (cfg.project / "DIALOGUE-archive").glob("*"))}
     cfg.saves_dir.mkdir(parents=True, exist_ok=True)
     # 공백은 유효한 저장 이름에 포함되지 않아 목록에 임시 디렉터리가 노출되지 않는다.

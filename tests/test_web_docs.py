@@ -48,6 +48,7 @@ def test_docs_access_sort_and_auth(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.symlink
 @pytest.mark.parametrize('path', ['../out.md', '/tmp/out.md', 'plain.txt', 'big.md', 'escape.md', 'missing.md', '.duet/state.md'])
 def test_doc_rejects_bad_paths(tmp_path, path):
     (tmp_path/'plain.txt').write_text('x')
@@ -59,6 +60,7 @@ def test_doc_rejects_bad_paths(tmp_path, path):
     asyncio.run(with_client(tmp_path, check))
 
 
+@pytest.mark.symlink
 def test_docs_cannot_bypass_exclusions_with_internal_symlinks(tmp_path):
     (tmp_path/'docs').mkdir()
     (tmp_path/'docs/a.md').write_text('allowed')

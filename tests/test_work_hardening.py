@@ -19,6 +19,8 @@ from duet.core.gitops import Git
 from duet.core.orchestrator import Orchestrator
 from duet.core.work import WorkBoard, WorkItem, REPORT_TRIGGER
 from duet.core.worktrees import Worktrees, GitError
+from duet.core.fsutil import is_link
+from duet.core.procs import group_kwargs, kill_tree, pid_alive
 
 
 def git(path, *args):
@@ -27,7 +29,7 @@ def git(path, *args):
 
 @pytest.fixture
 def repo():
-    with tempfile.TemporaryDirectory(prefix='duet-b1-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='duet-b1-', dir='/tmp' if os.name != 'nt' else None) as directory:
         path = Path(directory).resolve()
         git(path, 'init', '-q', '-b', 'main')
         git(path, 'config', 'user.email', 'test@example.com')
@@ -56,7 +58,7 @@ def test_h6_links_never_committed(repo, name, staged):
     (repo / name / 'keep').write_text('dependency')
     wt = Worktrees(repo)
     path = wt.create('deps', 'main')
-    assert (path / name).is_symlink()
+    assert is_link(path / name)  # Windows 는 정션
     if staged:
         git(path, 'add', '-f', name)
     (path / 'code').write_text('change')
@@ -64,7 +66,7 @@ def test_h6_links_never_committed(repo, name, staged):
     wt.commit_all(path, 'work')
     wt.squash_into_base('deps', 'main', 'merge')
     assert name not in git(repo, 'ls-tree', '--name-only', 'HEAD').splitlines()
-    assert not (repo / name).is_symlink()
+    assert not is_link(repo / name)
     assert (repo / name / 'keep').read_text() == 'dependency'
 
 
@@ -86,6 +88,7 @@ def test_diff_ignores_base_only_changes(repo):
         wt.diff_stat(path, 'nonexistent-base')
 
 
+@pytest.mark.symlink
 def test_h6_preserves_other_files_and_exclude(repo):
     (repo / 'node_modules').mkdir()
     wt = Worktrees(repo)
@@ -282,9 +285,9 @@ def test_h9_test_process_group_cleanup(repo, monkeypatch, timeout):
         await asyncio.Event().wait()
     proc = SimpleNamespace(pid=123456, communicate=communicate, wait=AsyncMock(), kill=lambda: None)
     spawn = AsyncMock(return_value=proc)
-    monkeypatch.setattr(asyncio, 'create_subprocess_shell', spawn)
+    monkeypatch.setattr('duet.core.work.create_shell', spawn)
     killed = []
-    monkeypatch.setattr(os, 'killpg', lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr('duet.core.work.kill_tree', killed.append)
     async def go():
         task = asyncio.create_task(b._run_test(WorkItem('test', 'implementer', 'test'), repo, 'pwd'))
         await started.wait()
@@ -295,9 +298,9 @@ def test_h9_test_process_group_cleanup(repo, monkeypatch, timeout):
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-        assert killed == [(proc.pid, signal.SIGKILL)]
+        assert killed == [proc.pid]
         proc.wait.assert_awaited_once()
-        assert spawn.call_args.kwargs['start_new_session'] is True
+        assert spawn.call_args.args == ('pwd',)
     asyncio.run(go())
 
 
@@ -329,9 +332,7 @@ def test_h9_real_descendants_stop(repo, timeout):
                 with pytest.raises(asyncio.CancelledError):
                     await task
             for _ in range(200):
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
+                if not pid_alive(pid):
                     pid = None
                     break
                 await asyncio.sleep(0.01)
@@ -342,8 +343,13 @@ def test_h9_real_descendants_stop(repo, timeout):
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             if pid:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                kill_tree(pid)
     asyncio.run(go())
+
+
+def test_process_group_kwargs_per_platform():
+    kw = group_kwargs()
+    if os.name == 'nt':
+        assert kw['creationflags'] & subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kw == {'start_new_session': True}

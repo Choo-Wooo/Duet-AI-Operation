@@ -1,9 +1,12 @@
 import os
 import threading
 
+import pytest
+
 from duet.core.agreement import fingerprint
 
 
+@pytest.mark.fifo
 def test_fingerprint_skips_fifo_without_blocking(tmp_path):
     (tmp_path / "a.txt").write_text("hello")
     os.mkfifo(tmp_path / "pipe")  # 쓰는 쪽이 없는 named pipe: 열면 영원히 대기한다
