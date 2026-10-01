@@ -7,65 +7,32 @@
 
 ![웹 UI 진행 화면](docs/images/web-live.png)
 
-> 이 문서의 화면은 `--fake`(CLI 없이 흐름을 시험하는 데모 모드)로 촬영했습니다. 상단의 "가짜 에이전트" 표시는 데모 모드에서만 나타납니다.
+> 화면은 실제 웹 UI의 데모 모드로 촬영했습니다. 새 설계 질문 화면에는 동작 설명용 예제 질문·보류 상태를 넣었으며, 실제 사용자 대화나 운영 데이터는 사용하지 않았습니다. 상단의 "가짜 에이전트" 표시는 데모에서만 나타납니다.
 
 ## 목차
 
-- [빠른 시작](#빠른-시작)
 - [주요 기능](#주요-기능)
 - [동작 방식](#동작-방식)
 - [요구 사항](#요구-사항)
 - [설치와 실행](#설치와-실행)
+- [환경 점검과 복구](#환경-점검과-복구)
+- [세션과 문서를 보존하는 업데이트](#세션과-문서를-보존하는-업데이트)
 - [화면 구성](#화면-구성)
 - [역할](#역할)
 - [합의 기반 위임](#합의-기반-위임)
 - [병렬 작업](#병렬-작업)
 - [권한과 안전장치](#권한과-안전장치)
+- [설계 질문 모드](#설계-질문-모드)
 - [대화 모드](#대화-모드)
 - [긴 세션 관리](#긴-세션-관리)
 - [세션 저장과 불러오기](#세션-저장과-불러오기)
 - [명령어](#명령어)
 - [명령행 옵션](#명령행-옵션)
+- [무인 벤치마크](#무인-벤치마크)
 - [설정 파일](#설정-파일)
 - [CLI별 참고 사항](#cli별-참고-사항)
 - [문제 해결](#문제-해결)
-- [벤치마크 실행 (--bench)](#벤치마크-실행---bench)
 - [개발](#개발)
-
-## 빠른 시작
-
-작업할 프로젝트 폴더 안에 `duet/`을 두고, 환경 설치 스크립트로 점검·설치한 뒤 실행합니다. 두 스크립트는 같은 여섯 단계(Python, Git, Node.js, CLI, 가상환경, 요약)를 거칩니다.
-
-**macOS · Linux**
-
-```bash
-cd ~/my-project
-curl -fsSL https://raw.githubusercontent.com/Choo-Wooo/Duet-AI-Operation/main/install.sh | bash
-# 또는 직접: git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet && bash duet/setup.sh
-
-python3 duet --web    # 브라우저 웹 UI (권장)
-python3 duet          # 터미널 분할 화면(TUI)
-```
-
-**Windows (PowerShell 또는 명령 프롬프트)**
-
-```bat
-cd D:\my-project
-git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet
-duet\setup-windows.bat
-
-python duet --web     :: 또는 py duet --web
-```
-
-| 하는 일 | macOS · Linux | Windows |
-| --- | --- | --- |
-| 점검하고, 빠진 것은 하나씩 물어본 뒤 설치 | `bash duet/setup.sh` | `duet\setup-windows.bat` |
-| 점검만 (설치하지 않음) | `bash duet/setup.sh --check` | `duet\setup-windows.bat /check` |
-| 묻지 않고 빠진 것 모두 설치 | `bash duet/setup.sh --yes` | `duet\setup-windows.bat /yes` |
-| 자세한 진단 | `python3 duet --doctor` | |
-| 실행 | `python3 duet --web` | `python duet --web` |
-
-CLI는 설치 후 한 번씩 로그인해 두어야 합니다: `claude` 실행 후 `/login`, `codex login`, `agy` 실행 후 브라우저 로그인. 단계별 설치 방법은 [설치와 실행](#설치와-실행)에 있습니다.
 
 ## 주요 기능
 
@@ -75,6 +42,10 @@ CLI는 설치 후 한 번씩 로그인해 두어야 합니다: `claude` 실행 �
 - **병렬 작업**: 설계자가 작업을 나누고 역할별 세션 수를 정하면, 각 작업이 독립된 git 워크트리와 로컬 브랜치에서 동시에 진행된 뒤 기준 브랜치로 합쳐집니다.
 - **3단계 권한**: 안전한 요청은 자동 허용, 애매한 요청은 설계자 심사, 위험한 요청은 사람 확인. 사람이 모든 권한을 위임하는 전권 자동 모드도 있습니다.
 - **웹 UI와 터미널 UI**: 브라우저 대시보드(`--web`)와 분할 화면 TUI 중 골라 씁니다.
+- **설계 질문 모드**: 초기 계획 질문은 한 번에 확인하고, 진행 중 중요한 질문은 보류해 사이클 끝에 모아 묻습니다. 자동 승인과 함께 사용해도 필수 설계 결정을 대신 답하지 않습니다.
+- **설치·환경 점검**: macOS·Linux·Windows 설치 보조, `--doctor` 진단, 고정 의존성과 `uv` 지원.
+- **무인 벤치마크**: 과제 파일을 받아 자동 실행하고 최종 결과 커밋과 비용·토큰·진행 지표 JSON을 남깁니다.
+- **사용량 한도 자동 대기·재개(선택)**: 한도 오류의 재설정 시각까지 기다린 뒤 같은 세션에서 이어갑니다. 기본 꺼짐이며 대기 시간·횟수와 중단을 제어할 수 있습니다.
 - **긴 세션 안정화**: 컨텍스트 한도 감시, 역할별 압축 지침, 작업 기억 파일, 세션 교체와 인계로 깊은 작업을 오래 이어갑니다.
 - **세션 저장·복원, git 스냅샷, 롤백**: 대화 시점을 저장하고 되돌아갈 수 있으며, 턴마다 코드 스냅샷을 남깁니다.
 
@@ -99,100 +70,110 @@ flowchart LR
 
 | 항목 | 내용 |
 | --- | --- |
-| 운영체제 | macOS, Linux, Windows 10/11 |
-| Python | 3.10 이상. 없으면 Homebrew Python·`py` 런처·`uv`를 찾아 사용 (`uv`는 파이썬 3.12를 받아 씀) |
-| uv | macOS·Linux 권장. 의존성 설치가 빠르고 파이썬 버전 문제를 피합니다 (설치 스크립트가 함께 설치) |
-| git | 턴 스냅샷, 롤백, 병렬 작업에 필요. 하위 폴더 프로젝트의 병렬 병합은 2.45 이상 |
+| 운영체제 | macOS, Linux, Windows (설치 스크립트와 프로세스·UTF-8 처리 지원) |
+| Python | 3.10 이상 (없으면 Homebrew Python이나 `uv`를 찾아 사용) |
+| git | 턴 스냅샷, 롤백, 병렬 작업에 필요. 병렬 병합은 2.45 이상 권장 |
 | CLI | `claude`, `codex`, `agy` 중 쓰려는 것이 설치·로그인되어 있어야 합니다 |
 | Node.js | 디자이너의 브라우저 도구(Playwright MCP)를 쓸 때 `npx` 필요 |
 
-CLI 설치 (공식 설치 스크립트, 사용자 권한):
+CLI 설치:
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash               # Claude Code, 설치 후 claude 로 로그인
-curl -fsSL https://chatgpt.com/codex/install.sh | sh         # Codex CLI, 설치 후 codex login
-curl -fsSL https://antigravity.google/cli/install.sh | bash  # Antigravity CLI, 설치 후 agy 로 로그인
+npm i -g @anthropic-ai/claude-code   # Claude Code
+npm i -g @openai/codex               # Codex CLI
+# Antigravity CLI(agy)는 https://antigravity.google 안내에 따라 설치 후 agy 로 로그인
 ```
-
-Windows는 `irm https://claude.ai/install.ps1 | iex`(Claude Code), `npm i -g @openai/codex`(Codex)로 설치합니다. 설치 여부, PATH, 로그인 상태는 환경 설치 스크립트(`setup.sh`, `setup-windows.bat`)가 한 번에 점검합니다.
 
 ## 설치와 실행
 
-### macOS·Linux: setup.sh
+`duet/` 폴더를 작업할 프로젝트 안에 넣고 프로젝트 폴더에서 실행합니다.
 
-프로젝트 폴더에서 `bash duet/setup.sh`로 실행합니다. 여섯 단계로 점검하고, 빠진 것은 하나씩 물어본 뒤 설치합니다. `curl ... | bash`로 실행될 때도 질문은 터미널에서 받습니다.
+```bash
+cp -r duet ~/my-project/
+cd ~/my-project
 
-| 단계 | 점검 | 설치 방법 |
-| --- | --- | --- |
-| 1. Python · uv | Python 3.10+, uv | uv 공식 설치 스크립트, `uv python install 3.12` |
-| 2. Git | 설치 여부, 2.45 이상인지, 전역 user.email | macOS: Homebrew 또는 `xcode-select --install`, Linux: 배포판 패키지(sudo) |
-| 3. Node.js | `node` (디자이너 브라우저 도구 `npx`) | macOS: Homebrew, Linux: 배포판 패키지(sudo) |
-| 4. CLI | claude, codex, agy 설치·PATH·로그인 | 각 CLI 공식 설치 스크립트 (codex는 실패 시 npm) |
-| 5. 가상환경 | `.duet/venv`와 의존성 | duet 부트스트랩으로 생성 (`requirements.lock`) |
-| 6. 요약 | 문제·주의 개수, 실행 명령 | |
-
-`~/.local/bin` 같은 사용자 폴더에 설치돼 있지만 PATH에 없는 CLI는 셸 설정 파일(`~/.zshrc`, `~/.bashrc` 등)에 PATH 한 줄을 추가하겠냐고 묻습니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
-
-### Windows: setup-windows.bat
-
-프로젝트 폴더의 `duet\setup-windows.bat`을 실행합니다. 탐색기에서 더블클릭해도 되며, 이때는 끝난 뒤 창이 바로 닫히지 않고 멈춥니다.
-
-| 단계 | 점검 | 설치 방법 |
-| --- | --- | --- |
-| 1. Python | Python 3.10+ (`py` 런처, `python`) | `winget install Python.Python.3.12` |
-| 2. Git | 설치 여부, 2.45 이상인지, Git Bash 위치 | `winget install Git.Git` (오래된 버전은 `winget upgrade`) |
-| 3. Node.js | `node` (npm으로 CLI 설치, 디자이너 브라우저 도구 `npx`) | `winget install OpenJS.NodeJS.LTS` |
-| 4. CLI | claude, codex, agy 설치·로그인 | claude: 공식 `install.ps1`, codex: `npm i -g @openai/codex`, agy: 직접 설치 |
-| 5. 가상환경 | `.duet\venv`와 의존성 | duet 부트스트랩으로 생성 |
-| 6. 요약 | 문제·주의 개수, 실행 명령 | |
-
-설치 직후에는 레지스트리의 PATH를 다시 읽어 새 창을 열지 않아도 이어서 점검합니다. winget이 없으면 자동 설치 대신 내려받을 주소를 알려 줍니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
-
-Windows에서 macOS·Linux와 다르게 동작하는 부분은 다음과 같습니다.
-
-- CLI 는 `claude.exe`(네이티브 설치 `~\.local\bin`), npm 전역 설치(`%APPDATA%\npm`), Codex·agy 설치 폴더에서도 찾습니다.
-- 에이전트가 합의한 테스트 명령은 Git Bash 로 실행합니다(에이전트가 bash 문법으로 쓰기 때문). Git Bash 가 없으면 `cmd` 로 실행합니다.
-- Codex·agy 는 Windows 에서 PowerShell 로 명령을 실행합니다. `Get-Content`, `Get-ChildItem`, `Select-String` 같은 읽기 전용 명령은 자동 허용하고, `Remove-Item -Recurse`, `Invoke-WebRequest`, `Stop-Process` 등은 사람 확인 대상입니다. 이 규칙은 새로 만드는 `.duet/policy.yaml` 에 들어가므로, 기존 프로젝트는 `policy.yaml` 을 지우고 다시 실행하면 반영됩니다.
-- 병렬 작업 워크트리의 `node_modules`·`.venv` 링크는 관리자 권한이 필요 없는 정션(junction)으로 만듭니다.
-- agy 권한 훅은 유닉스 소켓 대신 127.0.0.1 의 임시 포트(토큰 확인)로 duet 과 통신합니다.
-- `/ask` 질문 콘솔은 새 콘솔 창으로 열립니다. 승인 요청 알림은 브라우저 탭이 없을 때 Windows 알림으로 뜹니다.
-
-### 설치 스크립트 install.sh (macOS·Linux)
-
-`./duet`에 저장소를 내려받고(이미 git 클론이면 최신으로 갱신) `duet/setup.sh`를 실행합니다. 환경 변수로 동작을 바꿀 수 있습니다.
-
-| 변수 | 설명 |
-| --- | --- |
-| `DUET_REF` | 브랜치 또는 태그 (기본 `main`) |
-| `DUET_DIR` | 설치 위치 (기본 `./duet`) |
-| `DUET_NO_UV=1` | uv를 설치하지 않고 시스템 파이썬만 사용 |
-| `DUET_FIX=1` | 빠진 것을 묻지 않고 모두 설치 (`setup.sh --yes`) |
-| `DUET_CHECK=1` | 점검만 하고 설치하지 않음 (`setup.sh --check`) |
-
-### 자세한 진단: --doctor (macOS·Linux)
-
-`python3 duet --doctor`는 가상환경을 만들기 전에 표준 라이브러리만으로 실행되며 다음을 확인합니다.
-
-- 운영체제, root 실행 여부, duet을 돌릴 파이썬(3.10+)과 uv
-- git 버전과 전역 사용자 설정, 프로젝트 저장소 상태(커밋, 브랜치)
-- Node.js(`npx`) 유무
-- `claude`, `codex`, `agy`의 설치 위치, PATH 등록 여부, 버전, 로그인 상태
-- `.duet/roles.yaml`의 역할이 설치되지 않은 CLI를 쓰는지
-- `.duet/venv` 상태와 PyPI 연결
-
-`--fix`를 붙이면 PATH 등록(셸 설정 파일에 한 줄 추가)과 빠진 CLI·uv 설치를 항목마다 물어보고 실행합니다. `--yes`는 묻지 않고 진행하고, `--no-login`은 로그인 확인을 건너뜁니다. 해결이 필요한 항목이 있으면 종료 코드 1을 돌려줍니다.
-
-### 처음 실행할 때
+python3 duet --web    # 브라우저 웹 UI (권장)
+python3 duet          # 터미널 분할 화면(TUI)
+```
 
 처음 실행하면 다음을 자동으로 준비합니다.
 
-1. `.duet/venv` 가상환경과 의존성(claude-agent-sdk, textual, pyyaml, aiohttp). 검증된 버전을 고정한 `requirements.lock`으로 설치하고, 그 플랫폼에서 실패하면 `requirements.txt`의 범위 지정으로 다시 시도합니다. uv가 있으면 uv로 만들고 설치합니다(`DUET_USE_PIP=1`이면 pip). 두 파일 중 하나가 바뀌면 다시 설치합니다.
+1. `.duet/venv` 가상환경과 의존성(claude-agent-sdk, textual, pyyaml, aiohttp). `requirements.lock`의 고정 버전을 먼저 설치하고 실패하면 `requirements.txt`의 버전 범위로 재시도합니다. 두 파일의 해시가 바뀌면 다시 설치하며, `uv`가 있으면 우선 사용합니다.
 2. 설치된 CLI를 찾아 `.duet/roles.yaml`을 만듭니다. 여러 곳에 설치된 CLI는 가장 최신 버전을 고릅니다.
 3. 각 CLI의 로그인 계정을 확인해 구독인지 API 키 과금인지 알려 줍니다.
 4. `.duet/modes.yaml`, `.duet/policy.yaml`, `DIALOGUE.md`를 만듭니다.
 5. git 저장소가 아니면 `git init`을 하고, `.gitignore`에 duet 폴더와 런타임 파일을 추가합니다.
 
 `--web`은 이 컴퓨터(127.0.0.1)에서만 열리는 서버를 띄우고, 실행마다 새로 만든 토큰이 붙은 주소를 브라우저로 엽니다. 토큰 없는 요청은 거부합니다. 종료는 터미널에서 `Ctrl+C`입니다.
+
+### macOS·Linux 설치 도우미
+
+프로젝트 폴더에서 저장소를 내려받은 뒤 환경을 점검합니다.
+
+```bash
+git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet
+bash duet/setup.sh --check     # 점검만
+bash duet/setup.sh             # 필요한 설치를 항목별로 확인
+# bash duet/setup.sh --yes     # 빠진 항목을 묻지 않고 설치
+python3 duet --web
+```
+
+`install.sh`는 현재 프로젝트에 `duet/`을 클론하거나 기존 Git 설치본을 갱신하고 `setup.sh`를 실행합니다.
+`DUET_DIR`(기본 `duet`), `DUET_REF`(기본 `main`), `DUET_REPO`로 설치 대상을 지정할 수 있습니다.
+`DUET_NO_UV=1`은 uv 설치를 생략하고, `DUET_CHECK=1`은 후속 환경 설치를 생략합니다. 후자는 클론·코드 갱신 자체를 막지는 않습니다.
+`DUET_FIX=1`은 후속 설치를 자동 수락합니다.
+
+### Windows
+
+프로젝트 폴더의 명령 프롬프트에서:
+
+```bat
+git clone https://github.com/Choo-Wooo/Duet-AI-Operation.git duet
+duet\setup-windows.bat /check
+duet\setup-windows.bat
+python duet --web
+```
+
+`/check`는 점검만, `/yes`는 필요한 항목의 자동 설치입니다. Python, Git·Git Bash, Node.js, CLI 설치·로그인과 가상환경을 확인합니다.
+Python 런처(`py`) 검색, UTF-8 콘솔, 하위 프로세스 종료, 경로·junction 처리와 데스크톱 알림을 지원합니다.
+Windows에서는 가상환경 Python이 `.duet\venv\Scripts\python.exe`에 있습니다. macOS·Linux의 `.duet/venv/bin/python` 예제를 이 경로로 바꿔 사용하세요.
+
+## 환경 점검과 복구
+
+```bash
+python3 duet --doctor                  # 진단과 해결 안내
+python3 duet --doctor --no-login       # CLI 로그인 상태 조회 생략
+python3 duet --doctor --fix            # 수정 가능한 항목을 확인 후 처리
+python3 duet --doctor --fix --yes      # 수정 작업을 자동 수락
+```
+
+`--doctor`는 가상환경을 만들기 전에 표준 라이브러리만으로 실행합니다. 운영체제, Python·uv, Git, Node.js, CLI 경로·버전·로그인, 역할 설정, 가상환경과 네트워크를 점검합니다. PATH 밖에 설치된 CLI도 찾아 해결 방법을 보여 줍니다.
+수정 후에는 새 터미널에서 다시 점검하세요. `--fix` 실행의 종료 코드는 수정 전 진단 결과를 기준으로 하므로 재점검 결과를 확인해야 합니다.
+`--no-login`은 로그인 확인만 생략하며 네트워크 점검을 끄는 옵션은 아닙니다.
+
+## 세션과 문서를 보존하는 업데이트
+
+코드는 프로젝트의 `duet/`에, 사용자 세션과 문서는 그 옆에 저장됩니다.
+
+| 경로 | 업데이트 때 처리 |
+| --- | --- |
+| `duet/` | 코드·의존성·설치 스크립트 갱신 |
+| `.duet/` | 세션 ID, 설정, 저장본, 작업 기억·작업 상태 보존 |
+| `DIALOGUE.md`, `DIALOGUE-archive/` | 대화와 과거 기록 보존 |
+| 프로젝트의 `docs/` 및 기타 문서 | 설계·계획·작업 기록 보존 |
+
+진행 중 작업을 정리하고 duet을 종료한 뒤, `duet/`을 별도로 클론한 설치라면 다음과 같이 갱신합니다.
+
+```bash
+git -C duet status --short
+# 로컬 변경이 없음을 확인한 뒤 실행
+git -C duet pull --ff-only
+python3 duet --web
+```
+
+직접 복사한 설치본은 대상 코드의 로컬 수정부터 백업·비교하고 코드 파일만 반영하세요. 대상의 `.git`을 원본 것으로 덮어쓰거나, 프로젝트 루트 전체를 삭제·동기화하지 않습니다.
+`duet/docs/`는 도구 설명용 이미지이고 프로젝트의 `docs/`는 작업 문서입니다. 두 경로를 구분하세요.
+기존 세션을 이어갈 때는 `--new-session`을 사용하지 않습니다. 의존성 변경에 따른 가상환경 갱신은 다음 실행 때 자동 처리됩니다.
 
 ## 화면 구성
 
@@ -250,7 +231,7 @@ Windows에서 macOS·Linux와 다르게 동작하는 부분은 다음과 같습�
 
 #### 설정
 
-맨 위의 **전권 자동 수락** 스위치로 승인·선택을 묻지 않고 진행하게 할 수 있습니다([전권 자동 모드](#전권-자동-모드)). 그 아래에서 병렬 동시 실행 수, 자동 병합, 통합 테스트 명령, 계획 합의 라운드, 컨텍스트 한도 등 진행 설정을 바꿉니다. 변경 내용은 `.duet/roles.yaml`에 저장됩니다.
+전권 자동 수락과 설계 질문 모드를 각각 켜고 끕니다. 병렬 동시 실행 수, 자동 병합, 구현 전 테스트, 통합 테스트 명령, 계획 합의 라운드, 압축 시간 제한과 컨텍스트 한도도 바꿉니다. 설계 질문은 이 화면의 카드에서 다시 확인할 수 있고, 답변은 **진행 탭으로 돌아가 메인 메시지 입력란**에 보냅니다. 변경 내용은 `.duet/roles.yaml`에 저장됩니다.
 
 ![설정](docs/images/web-settings.png)
 
@@ -333,7 +314,7 @@ stateDiagram-v2
 3. **implement**: 합의한 계획대로 구현합니다. 범위를 벗어나야 하면 새 계획과 `REPORT deviation`을 냅니다.
 4. **verify**: 설계자가 합의된 테스트 명령을 직접 실행하고 계획 밖 변경을 검토해 `ACCEPT` 또는 `REWORK 사유`로 판단합니다.
 
-계획서는 `docs/plans/<task-id>.md`에 버전별로 기록됩니다. `plan_approval: human`으로 두면 합의 후 사람의 최종 승인을 받습니다.
+계획서는 `docs/plans/<task-id>.md`에 버전별로 기록됩니다. `plan_approval: human`으로 두면 합의 후 사람의 최종 승인을 요청합니다. 전권 자동이 켜져 있으면 이 승인 선택도 자동 처리됩니다. 실제 사용자의 요구·설계 결정을 남겨 두려면 별도의 설계 질문 모드를 켜세요.
 
 ## 병렬 작업
 
@@ -368,6 +349,8 @@ flowchart LR
 - **설계자 분신**: 설계자 세션을 복제한 분신이 작업마다 붙어 계획 검토와 검증을 맡습니다. 설계자가 여러 세션과 동시에 협의하는 구조입니다.
 - **세션 간 협의**: 작업자는 `CONSULT <작업id|architect> <질문>`으로 다른 작업 세션(읽기 전용 복제본)이나 설계자 분신에게 묻습니다.
 - **병합**: 검증을 통과하면 duet이 작업 브랜치에 기준 브랜치의 최신 내용을 합칩니다. 충돌이 나면 작업자가 해결하고, 통합 테스트를 통과하면 기준 브랜치에 squash 병합한 뒤 워크트리와 작업 브랜치를 지웁니다. 병합 커밋 작성자는 git 설정의 사용자 본인입니다. `auto_merge: false`로 두면 병합 전에 사람에게 묻습니다.
+- **구현 전 테스트**: `work_baseline_test: true`(기본)면 계획 합의 직후 같은 테스트를 먼저 실행해 기존 실패를 기록합니다. 구현 후에도 실패하면 설계자가 이전 출력과 비교합니다. 남은 실패가 모두 기존 문제라고 확인한 경우에만 `ACCEPT baseline`으로 예외 수용할 수 있으며, 새 실패를 자동으로 무시하지 않습니다. 별도의 통합 테스트 명령이 실패하면 병합을 막습니다.
+- **응답 형식 보완**: 병렬 계획·검증에서 첫 유효 줄의 `AGREE`·`REVISE`·`ACCEPT`·`REWORK`도 인식하지만, HTML 주석 지시문 형식이 권장됩니다. 테스트 명령에 잘못 붙은 백틱도 정리합니다.
 - **push 금지**: duet은 원격에 아무것도 올리지 않습니다. `duet/work/*` push를 막는 pre-push 훅을 넣으며, 기존 pre-push 훅이 있으면 건드리지 않고 알려 줍니다. 작업이 끝나면 사람이 기준 브랜치만 push하면 됩니다. Bitbucket처럼 브랜치 생성이 제한된 환경에서도 배정받은 브랜치 하나만 쓰게 됩니다.
 - **보고**: 한 차수의 작업이 모두 끝나거나 판단이 필요한 작업만 남으면 결과가 설계자에게 보고됩니다. 설계자는 `RESUME_WORK <id> [답]`, `CANCEL_WORK <id> <사유>`로 대기 작업을 처리합니다.
 - **기록**: 작업별 대화는 `docs/work/<id>.md`, 상태는 `.duet/work.json`에 남습니다.
@@ -383,6 +366,7 @@ flowchart LR
 | 사람 확인 | `rm -rf`, `git push`, `git reset --hard`, `sudo`, `curl`·`ssh`, `.env`·키 파일, 프로젝트 밖 경로, 해석이 모호한 셸 구문 | 설계자 의견과 함께 승인 요청 |
 
 - 명령은 따옴표와 셸 구문을 해석해 부분 명령마다 검사하며, 읽기 명령에 붙은 쓰기 옵션(`sed -i`, `sort -o` 등)과 파일 리다이렉트도 잡아냅니다.
+- Windows의 PowerShell·cmd 명령도 검사합니다. 재귀 삭제, 다운로드, 프로세스 종료, 권한 상승·레지스트리 변경 등은 별도 규칙으로 분류합니다.
 - 규칙은 `.duet/policy.yaml`에서 고칩니다. 판정 기록은 `DIALOGUE.md`에 `> [approval] …`로 남습니다.
 - Claude는 PreToolUse 훅과 권한 콜백으로, Codex는 턴별 샌드박스와 승인 요청으로, agy는 duet 전용 PreToolUse 훅으로 같은 정책을 적용합니다.
 
@@ -397,12 +381,41 @@ flowchart LR
 
 - 사람·설계자 확인이 필요하던 요청도 자동 허용합니다. 단 `policy.yaml`의 `autopilot_deny`(기본: `git push`, `sudo`, `/`·`~` 통째 삭제, `mkfs`·`dd`, 패키지 배포)는 막습니다.
 - 턴 한도, 합의 라운드, 병합 확인 같은 선택은 진행 쪽으로 자동으로 고릅니다. 같은 질문이 다섯 번 넘게 반복되면 멈추고, 사람이 정한 예산 한도는 지킵니다.
-- 작업자의 질문(`ASK_HUMAN`, `REPORT blocked`)은 설계자가 사람 대신 판단합니다. 설계자 자신의 질문만 사람에게 옵니다.
+- 설계 질문 모드가 꺼져 있으면 순차 작업자의 질문(`ASK_HUMAN`, `REPORT blocked`)은 설계자가 사람 대신 판단합니다. 설계자 자신의 질문은 사람에게 옵니다. 병렬 작업의 질문은 해당 작업을 대기 상태로 만들고 설계자에게 보고됩니다.
+- **설계 질문 모드를 켜면** 초기 질문과 진행 중 중요한 질문은 실제 사용자 답변을 기다립니다. 자동 도구 승인과 설계 결정을 분리하는 기능입니다.
 - 켜져 있는 동안 웹 UI 상단에 "전권 자동" 표시가 나타나며, 누르면 설정 화면으로 이동해 끌 수 있습니다.
 
-![전권 자동 수락을 켠 설정 화면](docs/images/web-autopilot.png)
+## 설계 질문 모드
 
-스위치를 켜면 확인 창이 한 번 뜨고, 켜진 동안 카드 테두리와 상단 표시가 붉게 바뀝니다. 끄면 바로 원래의 승인 흐름으로 돌아갑니다.
+자동 승인은 유지하면서 요구·취향·범위·호환성처럼 사람이 정해야 할 선택을 남겨 두는 별도 설정입니다. 기본값은 **꺼짐**이며, `review`·`sprint`·`autopilot` 등 어떤 대화 모드와도 함께 쓸 수 있습니다.
+설계 질문 모드 자체가 자동 승인을 켜지는 않습니다. 아래처럼 두 기능을 함께 켜면 질문에 답한 뒤 일반 작업은 자동으로 진행됩니다.
+
+```text
+/design-questions on
+/autopilot on
+```
+
+웹 UI에서는 **설정 → 진행 설정 → 설계 질문 모드**를 켭니다. 상단 배지에 활성 상태와 보류 질문 수가 표시됩니다.
+
+1. **초기 계획 질문**: 새 요청의 시작에 아키텍트가 확인할 내용을 모아 선택지·추천안·영향과 함께 묻습니다. 질문 단계는 읽기·검색만 허용하고 구현·위임은 시작하지 않습니다. 질문이 없으면 이해한 요구와 계획의 진행 여부를 확인합니다.
+2. **답변을 기준으로 진행**: 진행 탭의 하단 메인 메시지 입력란에서 번호별로 답하면 설계자가 이를 반영해 계획과 작업을 이어갑니다. 자동 승인이 켜져 있으면 일반 도구 승인·운영 선택은 기존 방식대로 처리합니다.
+3. **중요 질문 보류**: 진행 중 새롭게 발견한 중요한 미확정 사항을 `ASK_HUMAN`으로 기록합니다. 사소한 구현 선택은 에이전트가 판단하고, 중요한 결정에 의존하는 작업은 보류하며 독립적인 작업을 계속합니다.
+4. **사이클 끝에 한 번에 확인**: 진행 가능한 작업이 끝나거나 보류 작업만 남으면 질문을 묶어 표시합니다. 모든 병렬 작업이 실행을 마칠 때까지 기다리므로 개별 작업마다 사람을 호출하지 않습니다. 보류 작업을 답변 없이 자동 `RESUME`·`RESUME_WORK`할 수 없습니다.
+5. **답변 후 재개**: 다음 사용자 메시지를 설계자에게 전달해 보류 질문과 함께 검토합니다. 답하지 않았거나 모호한 항목은 다시 질문하도록 안내합니다.
+
+여기서 사이클은 사용자 요청에서 시작해 진행 가능한 순차·병렬 작업을 마치는 한 차례입니다. 개별 도구 호출이나 에이전트 한 턴을 뜻하지 않습니다.
+기존 작업 도중 켜면 진행 중 질문부터 적용하고, 초기 질문은 다음 새 요청에서 진행합니다. 중요한 질문의 선별·내용은 에이전트가 맡고, 대기·저장·재개 차단은 오케스트레이터가 처리합니다.
+
+**초기 질문 — 설정 화면에서 질문을 다시 확인한 뒤, 진행 탭의 메인 입력란에서 답변합니다.**
+
+![설계 질문 모드의 초기 질문과 사용자 답변 대기](docs/images/web-design-questions-initial.png)
+
+**사이클 마무리 — 역할별로 모인 중요 질문을 한 번에 확인합니다.**
+
+![사이클 종료 후 보류한 중요 질문 묶음](docs/images/web-design-questions-final.png)
+
+질문과 대기 단계는 `.duet/state.json`에 저장되며 재시작 후에도 유지됩니다. `/design-questions off`는 기능만 끄고 보류 기록은 지우지 않습니다.
+웹의 **질문 탭**과 `/ask`는 본 작업에서 분리된 읽기 전용 상담 창입니다. 설계 질문에 대한 답은 질문 탭이 아니라 **메인 대화 입력란**으로 보내세요.
 
 ## 대화 모드
 
@@ -411,7 +424,7 @@ flowchart LR
 | sprint | 20 | 사용 안 함 | 설계는 짧게, 바로 위임하고 결과 위주로 진행 |
 | review | 60 | 사용 | 구현 후 꼼꼼히 검토하고 재작업을 적극 요청 (기본) |
 | deliberate | 무제한 | 사용 | 구현 전에 대안·반론·위험을 충분히 논의 |
-| autopilot | 무제한 | 사용 | 전권 자동. 승인·선택을 사람에게 묻지 않음 |
+| autopilot | 무제한 | 사용 | 전권 자동. 설계 질문 모드를 켜면 사용자 설계 결정은 별도로 대기 |
 
 - 턴 한도에 닿으면 10턴 더, 30턴 더, 무제한, 설계자가 정리하고 끝내기, 바로 멈추기 중에서 고릅니다.
 - 무제한일 때도 정체(코드·문서 변경 없음), 핑퐁(변경을 서로 되돌림), 같은 작업 반복을 감지하면 멈추고 묻습니다.
@@ -422,11 +435,31 @@ flowchart LR
 | 장치 | 설명 |
 | --- | --- |
 | 컨텍스트 한도 | 역할별 `context_limit`(설계자 50만, 작업자 30만 토큰, 기본 10만)을 넘으면 다음 턴 전에 압축 |
+| 압축 시간 제한 | `compact_timeout_sec`(기본 300초) 내에 끝나지 않으면 실패로 처리하고 후속 복구 흐름으로 진행 |
 | 역할별 압축 지침 | 설계 결정·합의 계획·바꾼 파일 등 역할마다 보존할 내용을 지정해 CLI 고유 압축을 실행 |
 | 작업 기억 | 에이전트가 매 턴 목표·결정·파일 지도를 요약하고, duet이 `.duet/memory/<역할>.md`에 저장 |
 | 세션 교체 | 압축으로 부족하거나 입력 한도 오류가 나면 새 세션으로 바꾸고 작업 기억으로 인계 |
 | 프롬프트 가드 | 한 턴 입력이 `prompt_max_chars`를 넘으면 초과분을 `.duet/reports/`로 빼고 경로만 전달 |
 | 체크포인트 | 일정 턴마다 또는 `DIALOGUE.md`가 커지면 설계자가 요약하고 이전 대화를 `DIALOGUE-archive/`로 이동 |
+
+### 사용량 한도 자동 대기·재개 (선택)
+
+5시간 사용량 한도 등으로 CLI가 거절한 작업을 기다렸다가 이어가는 옵션입니다. **기본값은 꺼짐**이며, 자동 승인·설계 질문 모드와 독립적으로 켜고 끕니다.
+
+```text
+/usage-retry on
+/usage-retry off
+```
+
+웹 **설정 → 사용량 한도 자동 대기·재개**에서도 켤 수 있습니다.
+
+- CLI가 명시적인 사용량·요청 한도 오류를 반환했을 때만 적용합니다. 정상 답변에 등장하는 ‘한도’라는 단어, 인증·결제 오류, 컨텍스트 초과나 사용자 중단을 자동 재시도하지 않습니다.
+- CLI가 제공한 재설정 시각·재시도 간격을 우선 사용합니다. 알려진 미래 재설정 시각에는 5초 여유를 두고, 시각이 없거나 이미 지났으면 `usage_limit_wait_sec`만큼 기다립니다(기본 18000초 = 5시간). 실제 한도가 항상 5시간에 풀린다고 가정하지 않습니다.
+- 본 작업, 병렬 작업 및 승인 심사 턴에 적용합니다. 같은 CLI를 사용하는 다른 턴도 관측된 대기 시간을 공유하고, 다른 CLI는 독립적으로 진행할 수 있습니다.
+- 대기 후 연결을 다시 열되 기존 세션·스레드 ID를 유지합니다. 이미 끝난 변경을 확인하고 미완료 부분만 이어가도록 안내합니다. 외부 도구 실행의 중복을 완전히 보장하는 트랜잭션 기능은 아닙니다.
+- 웹 진행 화면에 역할·재시도 시각을 표시합니다. `/pause` 상태에서는 시각이 지나도 재시도하지 않으며, `/resume` 후 이어갑니다. `/stop` 또는 옵션 끄기는 현재 대기를 취소합니다. 정해 둔 비용·시간 한도도 지킵니다.
+- 한 턴에서 최대 `usage_limit_max_retries`회(기본 3회) 재시도하고, 계속 제한되면 오류를 보고합니다. 로그인 상태나 계정을 바꾸거나 한도를 우회하지 않습니다.
+- **duet 프로세스가 실행 중이어야 합니다.** 앱·터미널을 종료하면 대기 실행도 끝나며, 재시작 시 예약을 자동 복원하지 않습니다. 컴퓨터가 잠든 동안에는 작업이 실행되지 않고 깨어난 뒤 시각을 확인합니다. 별도 읽기 전용 `/ask` 콘솔에는 이 자동 대기가 적용되지 않습니다.
 
 ## 세션 저장과 불러오기
 
@@ -447,6 +480,8 @@ flowchart LR
 | `/turns <N\|inf>` | 이번 요청의 턴 한도 |
 | `/auto on\|off` | off면 위임 전마다 확인 |
 | `/autopilot on\|off` | 전권 자동 수락 켜기·끄기 |
+| `/usage-retry [on\|off]` | 사용량 한도 자동 대기·재개 켜기·끄기, 상태 보기 |
+| `/design-questions [on\|off]` | 설계 질문 모드 켜기·끄기, 인자 없으면 상태와 보류 수 보기 |
 | `/role list` | 역할 목록 |
 | `/role add <이름> <claude\|codex\|agy> <모델> <설명>` | 역할 추가 |
 | `/role edit <이름> <항목>=<값>` | cli, model, brief, permissions, effort, context_limit, max_sessions 변경 |
@@ -467,7 +502,6 @@ flowchart LR
 
 | 옵션 | 설명 |
 | --- | --- |
-| `--doctor` | 환경 점검 (`--fix`, `--yes`, `--no-login`) |
 | `--web` | 브라우저 웹 UI로 실행 |
 | `--port <번호>` | 웹 UI 포트 (기본 8765, 사용 중이면 다음 번호) |
 | `--host <주소>` | 웹 UI 주소 (기본 127.0.0.1) |
@@ -476,14 +510,41 @@ flowchart LR
 | `--mode <이름>` | 시작 모드 |
 | `--max-turns <N\|inf>` | 요청당 턴 한도 |
 | `--budget-usd <금액>`, `--max-hours <시간>` | 비용·시간 한도 (선택) |
-| `-m "<메시지>"` | 시작하자마자 설계자에게 보낼 메시지 |
+| `-m "<메시지>"`, `--message "<메시지>"` | 시작하자마자 설계자에게 보낼 메시지 |
 | `--new-session` | 저장된 에이전트 세션을 버리고 새로 시작 |
 | `--load <이름>`, `--list-saves` | 저장본 불러오기, 목록 출력 |
 | `--ask [역할]` | 질문 콘솔만 실행 |
 | `--fake` | CLI 없이 가짜 에이전트로 흐름 시험 |
 | `--no-venv` | 가상환경 자동 준비를 건너뜀 |
-| `--bench` | 무인 벤치마크 실행: 과제 하나를 사람 없이 끝까지 진행하고 결과 커밋·지표 JSON을 남긴 뒤 종료 (아래 참고) |
-| `--role-model 역할=cli/모델` | 역할의 CLI·모델 지정 (여러 번 가능) |
+| `--doctor` | 환경 진단 후 종료 |
+| `--fix`, `--yes` (`-y`), `--no-login` | `--doctor`의 수정·자동 수락·로그인 조회 생략 옵션 |
+| `--bench` | 무인 벤치마크 실행 |
+| `--bench-task <파일>` | 과제 설명 파일 (`-m`보다 우선) |
+| `--bench-out <파일>` | 결과 JSON 경로 (기본 `.duet/bench-result.json`) |
+| `--bench-parallel <N>` | 병렬 작업 수 (1이면 병렬 없이 진행하도록 안내) |
+| `--bench-timeout <초>` | 전체 제한 시간 (기본 10200초) |
+| `--bench-nudges <N>` | 사람 차례에서 자동 재촉하는 최대 횟수 (기본 3) |
+| `--role-model <역할=cli/모델>` | 역할별 CLI·모델 지정. 여러 번 사용 가능 |
+
+## 무인 벤치마크
+
+`--bench`는 과제 하나를 무인으로 수행하고 결과 커밋과 비교 가능한 지표를 남깁니다. 일반 개발 세션과 분리한 **전용 체크아웃·프로젝트**에서 사용하세요. 기존 미커밋 파일까지 결과 커밋 대상으로 수집하며, 자동 승인·자동 병합·모드 설정을 변경해 저장합니다.
+
+```bash
+python3 duet --bench --bench-task instruction.md \
+  --bench-out result.json --bench-parallel 3 --bench-timeout 3600
+
+# CLI 없이 실행 흐름 확인
+python3 duet --bench --fake -m "src/app.py에 hello 함수를 구현" \
+  --bench-parallel 1 --bench-out demo-result.json
+```
+
+- 역할 모델을 바꾸려면 `--role-model architect=claude/<모델명>`처럼 지정합니다. 모델명은 역할·모델 화면 또는 각 CLI에서 확인하세요. 이 옵션은 일반 실행에도 적용됩니다.
+- 과제 완료·정체·시간 초과 시 종료합니다. 결과 JSON의 `finished`는 `done`, `stalled`, `timeout`, `error` 중 하나입니다. 프로세스 종료 코드 0만으로 과제 성공을 판단하지 말고 `finished`와 결과 테스트를 확인하세요.
+- JSON에는 경과 시간, 역할별 턴·토큰, 비용 환산, 승인·거부·질문, 오류·경고, 병렬 작업과 병합 수, 기준/최종 커밋·변경 파일이 담깁니다.
+- 마무리 단계는 코드 결과를 커밋하면서 duet 런타임·대화·계획·작업 기록을 최종 변경 대상에서 제외합니다. 파일을 모두 지우는 동작이 아니라 Git 인덱스를 정리하는 동작입니다. 원격 push는 하지 않습니다.
+- 컨테이너용으로 Codex 자체 샌드박스를 기본 해제하며 duet 정책은 유지합니다. 역할 MCP는 기본 비우고, 유지하려면 `DUET_BENCH_KEEP_MCP=1`을 지정합니다.
+- **설계 질문 모드는 꺼 두세요**(`settings.design_questions: false`). 벤치마크는 사람이 답하는 흐름이 아니라 자동 재촉 메시지로 진행하므로 설계 질문 모드의 사용자 확인 용도와 맞지 않습니다.
 
 ## 설정 파일
 
@@ -492,9 +553,13 @@ duet/                      이 도구 (프로젝트에 복사)
 .duet/roles.yaml           역할과 진행 설정 (main, roles, settings)
 .duet/modes.yaml           대화 모드 프리셋
 .duet/policy.yaml          권한 정책 (auto_commands, human_commands, protected_paths, autopilot_deny)
-.duet/state.json           세션 ID, 턴 번호, 현재 모드, 진행 중 작업 (자동 관리)
+.duet/state.json           세션 ID, 턴 번호, 현재 모드, 진행 중 작업·설계 질문 (자동 관리)
 .duet/work.json            병렬 작업 상태 (자동 관리)
 .duet/models.json          CLI별 모델 목록 캐시
+.duet/web.json             로컬 웹 접속 주소·프로세스 정보
+.duet/bench-result.json    벤치마크 결과 지표
+.duet/reports/             긴 프롬프트·변경 목록 등 보조 기록
+.duet/asks/                읽기 전용 질문 콘솔 기록
 .duet/memory/<역할>.md      역할별 작업 기억
 .duet/saves/<이름>/         저장한 세션
 .duet/logs/*.jsonl         전체 이벤트 로그
@@ -503,14 +568,22 @@ DIALOGUE.md                에이전트 공유 대화 문서
 docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록
 ```
 
-주요 `settings` 항목(`.duet/roles.yaml`, 웹 UI 설정 화면에서도 변경 가능):
+주요 `settings` 항목(`.duet/roles.yaml`). 아래 항목 중 `ask_compact_tokens`를 제외하면 웹 UI에서도 변경할 수 있습니다:
 
 | 항목 | 기본값 | 설명 |
 | --- | --- | --- |
+| `usage_limit_retry` | false | 사용량 한도에 걸린 턴을 대기 후 재시도 |
+| `usage_limit_wait_sec` | 18000 | 재설정 시각이 없을 때 대기할 초(60~604800) |
+| `usage_limit_max_retries` | 3 | 한 턴의 한도 오류 재시도 횟수(1~100) |
+| `full_auto` | false | 대화 모드와 별개로 일반 승인·선택 자동 처리 |
+| `design_questions` | false | 초기 질문과 사이클 끝 중요 질문에 사용자 답변 대기 |
 | `max_parallel` | 4 | 병렬 작업 동시 세션 수 상한 |
 | `auto_merge` | true | 검증과 통합 테스트 통과 시 자동 병합 |
 | `integration_test` | 없음 | 병합 전 통합 테스트 명령 (없으면 작업별 test_command) |
 | `work_test_timeout` | 900 | 병렬 작업 테스트 시간 한도(초) |
+| `work_baseline_test` | true | 구현 전 테스트 결과로 기존 실패 구분 |
+| `compact_timeout_sec` | 300 | 대화 압축 시간 한도(초) |
+| `ask_compact_tokens` | 200000 | 읽기 전용 질문 콘솔 압축 기준 |
 | `plan_rounds` | 3 | 계획 합의 라운드 한도 |
 | `plan_approval` | architect | `human`이면 합의 후 사람 최종 승인 |
 | `context_limit_tokens` | 100000 | 역할 기본 컨텍스트 한도 |
@@ -519,6 +592,17 @@ docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록
 | `dialogue_max_kb` | 120 | `DIALOGUE.md` 보관 기준 |
 | `checkpoint_every` | 50 | 체크포인트 간격(턴, 0이면 끔) |
 | `git_snapshots` | true | 턴마다 git 스냅샷 커밋 |
+
+### 환경 변수
+
+| 변수 | 용도 |
+| --- | --- |
+| `DUET_CLAUDE_PATH`, `DUET_CODEX_PATH`, `DUET_AGY_PATH` | 자동 검색 대신 사용할 CLI 실행 파일 경로 |
+| `DUET_USE_PIP=1` | 의존성 설치 때 가능한 경우 uv 대신 pip 선택 |
+| `DUET_NO_VENV=1` | 가상환경 준비 생략 (`--no-venv`와 동일) |
+| `DUET_NO_NOTIFY=1` | 브라우저 연결이 없을 때 데스크톱 알림 생략 |
+| `DUET_CODEX_SANDBOX=off` | 격리된 벤치 컨테이너 등에서 Codex 자체 샌드박스 해제 |
+| `DUET_BENCH_KEEP_MCP=1` | 벤치마크에서 역할 MCP 설정 유지 |
 
 ## CLI별 참고 사항
 
@@ -543,8 +627,12 @@ docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록
 
 | 증상 | 확인할 것 |
 | --- | --- |
-| 설치·실행이 안 됨 | `bash duet/setup.sh`(Windows는 `duet\setup-windows.bat`)로 점검·설치하고, 자세한 원인은 `python3 duet --doctor`로 확인하세요. |
-| 의존성 설치 실패 | 네트워크·프록시를 확인하고 `.duet/venv`를 지운 뒤 다시 실행하세요. Debian·Ubuntu에서 venv 모듈이 없으면 `sudo apt install python3-venv` 또는 uv를 설치하세요. |
+| 설계 질문이 자동 처리되는 것 같음 | 설정의 **설계 질문 모드**를 켜고 메인 입력란으로 답변하세요. `/ask`는 별도 상담입니다. 초기 질문은 새 요청부터 시작됩니다. |
+| 질문에 답했는데 작업이 보류됨 | 질문의 번호·선택을 명확히 답했는지 확인하세요. 메인이 답변을 반영한 뒤 작업을 재개합니다. |
+| 설치·가상환경 문제 | `python3 duet --doctor` 또는 `setup.sh --check` / `setup-windows.bat /check`로 진단하세요. |
+| Windows에서 한글·CLI 실행 문제 | 새 터미널에서 재실행하고 Python·Git Bash·CLI 경로를 점검하세요. |
+| 압축이 오래 걸림 | `compact_timeout_sec`를 확인하세요. 기본 제한은 300초입니다. |
+| 구현 전부터 실패하던 테스트 때문에 멈춤 | 작업 기록의 구현 전 테스트와 검증 출력을 비교하세요. 설계자가 기존 실패임을 확인하는 절차가 필요합니다. |
 | `unrecognized arguments: --web` | 프로젝트 안의 `duet/` 폴더가 이전 버전입니다. 최신 코드로 교체하세요. |
 | Claude가 API 오류(버전 미지원)를 냄 | 오래된 `claude`가 PATH에 먼저 잡혀 있을 수 있습니다. duet은 가장 최신 설치본을 고르지만, 시작 안내에 표시된 경로와 버전을 확인하세요. |
 | 비용이 예상보다 큼 | 시작 안내의 계정 표시에서 구독인지 API 키 과금인지 확인하세요. |
@@ -554,21 +642,6 @@ docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록
 | agy 권한 경고 | 시작 시 표시된 경고를 확인하고 `.agents/hooks.json`에 duet 훅이 있는지 보세요. |
 | 상태를 자세히 보고 싶음 | `.duet/logs/<날짜>.jsonl`에 모든 이벤트가 남습니다. |
 
-## 벤치마크 실행 (--bench)
-
-`--bench`는 사람 없이 과제 하나를 끝까지 진행하는 모드입니다. DeepSWE 같은 벤치마크 실행기가 컨테이너 안에서 부르는 용도입니다.
-
-```bash
-python3 duet --bench --bench-task instruction.md --bench-parallel 4 --bench-out result.json
-```
-
-- 전권 자동(autopilot)으로 진행하고, 설계자가 `STATUS done`으로 끝내고 남은 병렬 작업이 없으면 종료합니다. 사람 차례로 멈추면 "사람은 응답할 수 없다"는 안내를 몇 번(`--bench-nudges`, 기본 3) 보내 스스로 마무리하게 합니다.
-- 끝나면 duet 자신의 기록(`DIALOGUE.md`, `.duet/`, `docs/` 아래 작업 기록, `.gitignore`의 duet 줄)을 빼고 마지막 커밋을 만듭니다. 기준 커밋과 HEAD의 차이가 곧 과제 결과입니다.
-- 지표 JSON에는 종료 사유, 걸린 시간, 역할별 턴과 토큰, 승인 기록, 병렬 작업과 병합 결과, 바뀐 파일이 들어갑니다.
-- `--bench-parallel 1`이면 병렬 작업 없이 한 번에 하나씩 위임합니다. `--bench-timeout`(초, 기본 10200)으로 전체 시간을 제한합니다.
-
-DeepSWE로 duet과 단독 Claude Code·Codex를 비교하는 도구는 별도 폴더 `duet-bench`에 있습니다.
-
 ## 개발
 
 ```bash
@@ -576,13 +649,10 @@ DeepSWE로 duet과 단독 Claude Code·Codex를 비교하는 도구는 별도 �
 .duet/venv/bin/python -m pip install -r duet/requirements-dev.txt
 .duet/venv/bin/python -m pytest -p no:cacheprovider duet/tests -q
 
-# 의존성 고정 파일 갱신 (requirements.txt 를 바꾼 뒤)
-cd duet && uv pip compile requirements.txt --universal --python-version 3.10 --no-header -o requirements.lock
-
 # CLI 없이 전체 흐름 시험 (웹 UI)
 python3 duet --web --fake
 ```
 
-GitHub Actions(`.github/workflows/ci.yml`)가 push와 PR마다 Ubuntu·macOS, Python 3.10·3.12에서 테스트를 돌리고, 설치 스크립트와 첫 실행(가상환경 생성, lock 설치)을 검증합니다.
-
 `--fake`는 가짜 에이전트로 위임, 합의, 승인, 병렬 작업, 병합 흐름을 그대로 재현합니다. 테스트는 실제 git 저장소를 임시로 만들어 워크트리·병합·push 차단까지 검증합니다.
+
+CI는 `.github/workflows/ci.yml`에서 macOS·Linux의 Python 3.10/3.12 테스트와 설치 스크립트·첫 실행을 검증합니다. Windows 전용 동작은 이 CI 매트릭스에 포함되지 않습니다.

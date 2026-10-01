@@ -28,6 +28,7 @@ from .dialogue import extract_directives
 from .policy import ApprovalRequest, Decision, Policy, AUTO, read_only_decision
 from .procs import close_transport, create_shell, kill_tree
 from .prompts import BACKGROUND_WAIT
+from .design_questions import GUIDE
 from .worktrees import GitError, Worktrees, valid_id
 
 if TYPE_CHECKING:
@@ -366,6 +367,9 @@ class WorkBoard:
                 out.append(self.cancel(wid, why or "설계자 취소"))
             elif k == "RESUME_WORK":
                 wid, _, text = v.partition(" ")
+                if wid in self.items and getattr(self.orch, "design", None) and self.orch.design.blocked(self.items[wid].role + "#" + wid):
+                    out.append(f"{wid}: 실제 사용자 설계 답변 전에는 재개할 수 없습니다")
+                    continue
                 if text.strip() and wid in self.items:  # 대기 사유(질문)에 대한 답을 함께 전달
                     self.items[wid].inbox.append(f"설계자: {text.strip()}")
                     self._thread(self.items[wid], "설계자", text.strip())
@@ -390,6 +394,8 @@ class WorkBoard:
         it = self.items.get(wid)
         if not it or not it.status.startswith("waiting"):
             return f"재개할 대기 작업 '{wid}' 가 없습니다."
+        if getattr(self.orch, "design", None) and self.orch.design.blocked(it.role + "#" + wid):
+            return f"{wid}: 실제 사용자 설계 답변 대기"
         phase = it.status.split(":", 1)[1] if ":" in it.status else "plan"
         if it.negotiations >= it.negotiation_limit:
             it.negotiation_limit += 6
@@ -556,12 +562,15 @@ class WorkBoard:
     async def _turn(self, ad, it: WorkItem, kind: str, prompt: str, who: str):
         await self.orch.not_paused.wait()
         ad.turn_kind = kind
+        if getattr(self.orch, "design", None) and self.orch.design.enabled:
+            prompt += "\n" + GUIDE
         if it.inbox and who != "설계자":
             prompt += "\n\n이 작업에 온 메시지 (사람·설계자):\n" + "\n".join(f"- {m}" for m in it.inbox)
             it.inbox.clear()
         self.orch.bus.emit("turn_start", ad.label, n=0, kind=kind, info=it.id)
         try:
-            tr = await ad.run_turn(prompt)
+            runner = getattr(self.orch, "run_agent_turn", None)
+            tr = await runner(ad, prompt) if runner else await ad.run_turn(prompt)
         except BaseException as e:
             self.orch.bus.emit('turn_end', ad.label, ok=False, error=str(e),
                                interrupted=isinstance(e, asyncio.CancelledError))
@@ -586,7 +595,10 @@ class WorkBoard:
             raise
         except _Wait as w:
             self._touch(it, "waiting:" + w.phase, w.reason)
-            self.orch.bus.emit("ask", it.role + "#" + it.id, text=f"[{it.id}] {w.reason}")
+            if getattr(self.orch, "design", None) and self.orch.design.enabled:
+                self.orch.design.defer(it.role + "#" + it.id, w.reason)
+            else:
+                self.orch.bus.emit("ask", it.role + "#" + it.id, text=f"[{it.id}] {w.reason}")
         except Exception as e:
             self._touch(it, "failed", f"{type(e).__name__}: {e}")
             self._thread(it, "duet", f"작업 실패: {e}")
@@ -616,7 +628,8 @@ class WorkBoard:
         while True:
             # One submission (valid or invalid) plus its review is one negotiation.
             if it.negotiations >= it.negotiation_limit:
-                self.orch.bus.emit('ask', it.role, text=f'{it.id}: 협상 6회 한도 — 사람 응답/RESUME_WORK 필요')
+                if not (getattr(self.orch, "design", None) and self.orch.design.enabled):
+                    self.orch.bus.emit('ask', it.role, text=f'{it.id}: 협상 6회 한도 — 사람 응답/RESUME_WORK 필요')
                 raise _Wait('plan', '협상 6회 한도 — 사람 응답/RESUME_WORK 필요')
             it.negotiations += 1
             self._touch(it, "plan")
@@ -942,9 +955,9 @@ class WorkBoard:
 
     @staticmethod
     def _check_ask(dirs: list[tuple[str, str]], phase: str) -> None:
-        q = next((v for k, v in dirs if k == "ASK_HUMAN"), None)
-        if q is not None:
-            raise _Wait(phase, "사람에게 질문: " + (q or "(내용 없음)"))
+        questions = [v or "(내용 없음)" for k, v in dirs if k == "ASK_HUMAN"]
+        if questions:
+            raise _Wait(phase, "사람에게 질문: " + "\n".join(questions))
 
     # ---------------- 종료 ----------------
     async def close(self) -> None:

@@ -157,6 +157,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
     <span class="proj" id="proj"></span>
     <span class="chip" id="runchip"><span class="dot" id="rundot"></span><span id="runtxt">대기</span></span>
     <span class="chip" title="대화 모드"><select id="mode" style="border:none;background:none;padding:0"></select></span>
+    <span class="chip" id="designQuestionsBadge" hidden>설계 질문 모드</span>
     <span class="chip" id="autopilot" title="설정에서 끄기 · 전권 자동: 승인·선택을 묻지 않고 진행 (push·sudo·시스템 삭제·배포만 막음)" hidden style="color:var(--bad);border-color:var(--bad);cursor:pointer">전권 자동</span>
     <span class="chip" id="turns" title="이번 요청 턴 / 한도"></span>
     <span class="chip" id="cost" title="Claude API 환산 비용 (구독이면 실제 청구 아님) · 토큰"></span>
@@ -181,6 +182,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
     <main>
 
       <section class="view on" id="v-live">
+        <div id="usageWaitBanner" hidden class="help" style="padding:10px 14px;white-space:pre-wrap;color:var(--warn)"></div>
         <div class="live">
           <div class="col">
             <div class="colhead"><span class="t">대화 흐름</span><span>DIALOGUE.md · 결정·보고·단계</span>
@@ -258,6 +260,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
               작업자의 질문은 설계자가 대신 판단합니다. 다만 <code>git push</code>, <code>sudo</code>, 시스템 전체 삭제, 패키지 배포는 계속 막고,
               정해 둔 예산 한도는 지킵니다. 막는 목록은 <code>.duet/policy.yaml</code> 의 <code>autopilot_deny</code> 에서 바꿀 수 있습니다.
               대화 모드와 상관없이 적용되며, <code>autopilot</code> 모드를 고른 경우에도 켜집니다.</div></div>
+          <div class="card" id="designQuestionCard" hidden><h4>설계 질문</h4><div class="help" id="designQuestionState"></div><pre id="designQuestionText" style="white-space:pre-wrap"></pre><div class="help">아래 메시지 입력란에서 번호별로 답변하세요. 관련 작업은 답변을 기다립니다.</div></div>
           <div class="card"><h4>진행 설정</h4><div class="grid2" id="settings"></div></div>
           <div class="card"><h4>시작 안내</h4><pre id="startup" class="dim"></pre></div>
         </div></div>
@@ -457,6 +460,14 @@ function renderStatus(s) {
   $("#runtxt").textContent = summary; $("#runtxt").title = summary;
   $("#btnPause").textContent = s.paused ? "재개" : "일시정지";
   $("#autopilot").hidden = !s.full_auto;
+  const usageWaits = s.usage_waits || [];
+  $("#usageWaitBanner").hidden = !usageWaits.length;
+  $("#usageWaitBanner").textContent = usageWaits.map(w => `${w.role}: 사용량 한도 대기 · ${new Date(w.until * 1000).toLocaleString()} 이후 재시도 (${w.attempt}회)`).join("\n") + "\n대기 취소: /stop 또는 /usage-retry off";
+  $("#designQuestionsBadge").hidden = !s.design_questions;
+  $("#designQuestionsBadge").textContent = "설계 질문 모드" + (s.design_question_count ? ` · 보류 ${s.design_question_count}` : "");
+  $("#designQuestionCard").hidden = !s.design_questions || !s.design_question_text;
+  $("#designQuestionState").textContent = s.design_question_phase === "awaiting_initial" ? "초기 계획 · 답변 대기" : s.design_question_phase === "awaiting_final" ? "사이클 마무리 · 답변 대기" : "진행 중 · 중요 질문 수집";
+  $("#designQuestionText").textContent = s.design_question_text || "";
   $("#autopilot").onclick = () => document.querySelector('#nav button[data-v="settings"]').click();
   if ($("#fullAutoState") && S && S.settings) { const fa = !!S.settings.full_auto; $("#fullAutoState").textContent = fa ? "켜짐" : (s.full_auto ? "꺼짐 (autopilot 모드라 전권 자동 중)" : "꺼짐"); $("#autoCard").classList.toggle("on", !!s.full_auto); }
   $("#turns").textContent = `턴 ${s.run_turns}/${s.max_turns == null ? "∞" : s.max_turns}`;
@@ -741,13 +752,13 @@ function renderSettings() {
   $("#fullAutoState").textContent = fa ? "켜짐" : (active ? "꺼짐 (autopilot 모드라 전권 자동 중)" : "꺼짐");
   $("#autoCard").classList.toggle("on", active);
   $("#fullAuto").onchange = e => {
-    if (e.target.checked && !confirm("전권 자동 수락을 켤까요?\n승인·선택을 사람에게 묻지 않고 진행합니다. git push·sudo·시스템 삭제·배포만 막습니다.")) { e.target.checked = false; return; }
+    if (e.target.checked && !confirm("전권 자동 수락을 켤까요?\n일반 승인·선택을 자동 처리합니다. 설계 질문 모드를 켜면 중요 설계 질문은 직접 답변을 받습니다. git push·sudo·시스템 삭제·배포만 막습니다.")) { e.target.checked = false; return; }
     send({type: "setting", key: "full_auto", value: e.target.checked});
   };
   box.innerHTML = Object.entries(S.settings).filter(([k]) => k !== "full_auto").map(([k, v]) => {
     const input = typeof v === "boolean" ? `<input type="checkbox" data-k="${k}" ${v ? "checked" : ""}>` :
       typeof v === "number" ? `<input type="number" data-k="${k}" value="${v}">` : `<input type="text" data-k="${k}" value="${esc(v ?? "")}" style="width:100%">`;
-    return `<label class="mono">${k}</label><div>${input}<div class="help">${esc(S.settings_help[k] || "")}</div></div>`;
+    return `<label class="mono">${k === "design_questions" ? "설계 질문 모드" : k === "usage_limit_retry" ? "사용량 한도 자동 대기·재개" : k}</label><div>${input}<div class="help">${esc(S.settings_help[k] || "")}</div></div>`;
   }).join("");
   box.querySelectorAll("[data-k]").forEach(el => el.onchange = () => send({type: "setting", key: el.dataset.k, value: el.type === "checkbox" ? el.checked : el.value}));
 }

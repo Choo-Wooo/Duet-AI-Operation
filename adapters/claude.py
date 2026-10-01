@@ -25,6 +25,7 @@ from ..core.policy import ApprovalRequest, Decision
 from ..core.policy import PLAN_DENY_TEXT, PLAN_TOOLS, NETWORK_TOOLS, read_only_command, tool_matches
 from ..core.prompts import REVIEW_SYSTEM
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
+from ..core.usage_wait import classify
 
 
 def _context_size(usage) -> int:
@@ -175,7 +176,16 @@ class ClaudeAdapter(AgentAdapter):
         try:
             await self.client.query(self.recovery_prompt(prompt))
             async for msg in self.client.receive_response():
+                if type(msg).__name__ == "RateLimitEvent":
+                    info = getattr(msg, "rate_limit_info", None)
+                    if getattr(info, "status", None) == "rejected":
+                        result.usage_limited = True
+                        result.usage_reset_at = getattr(info, "resets_at", None)
                 if isinstance(msg, AssistantMessage):
+                    if getattr(msg, "error", None) == "rate_limit":
+                        result.ok = False
+                        result.error = "rate_limit"
+                        result.usage_limited = True
                     ctx = _context_size(getattr(msg, "usage", None))
                     if ctx:
                         self.context_tokens = ctx
@@ -205,7 +215,9 @@ class ClaudeAdapter(AgentAdapter):
                                          "cache_creation_input_tokens"))
                     if msg.is_error:
                         result.ok = False
-                        result.error = msg.result or msg.subtype
+                        result.error = msg.result or "\n".join(getattr(msg, "errors", None) or []) or msg.subtype
+                        if getattr(msg, "api_error_status", None) == 429:
+                            result.usage_limited = True
                     if msg.result and not texts:
                         texts.append(msg.result)
         except Exception as e:  # CLI 오류, 연결 끊김 등
@@ -221,7 +233,9 @@ class ClaudeAdapter(AgentAdapter):
             result.context_overflow = True
         if result.cost_usd is not None or result.tokens:
             self.bus.emit("usage", self.label, cost_usd=result.cost_usd or 0.0, tokens=result.tokens or 0)
-        return result
+        if result.ok:
+            result.usage_limited = False
+        return classify(result)
 
     async def compact(self, instructions: str = "") -> bool:
         """Claude Code 의 /compact 로 대화를 요약·압축한다. instructions 로 보존할 내용을 지정한다."""

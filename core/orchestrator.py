@@ -14,9 +14,11 @@ from .config import SUPPORTED_CLIS, Config, Role, validate_role_name
 from .dialogue import Dialogue, Turn, extract_directives
 from .agreement import (changed_files, fingerprint, new_task, parse_plan, read_plan, record_plan,
                         task_status, text_hash)
+from .usage_wait import UsageWait
+from .design_questions import DesignQuestions
 from .events import Event, EventBus
 from .gitops import Git
-from .policy import ARCHITECT, AUTO, DENY, HUMAN, ApprovalRequest, Decision, Policy
+from .policy import ARCHITECT, AUTO, DENY, HUMAN, ApprovalRequest, Decision, Policy, read_only_decision
 from .prompts import compact_instructions, opinion_prompt, review_prompt, system_append, turn_prompt
 from .textutil import extract_memory, save_memory, summarize_paths
 from .ui import HumanUI
@@ -139,6 +141,8 @@ class Orchestrator:
             cfg.state.task["waiting"] = True
             cfg.state.task["wait_reason"] = cfg.state.task["wait_reason"] or "재시작 후 메인의 재개 판단 대기"
         self.policy.task = cfg.state.task
+        self.usage = UsageWait(self)
+        self.design = DesignQuestions(self)
         self.work = WorkBoard(self)
         bus.subscribe(self._on_event)
         for warning in cfg.load_warnings:
@@ -164,6 +168,25 @@ class Orchestrator:
             msg = "전권 자동 수락을 껐습니다. 위험한 요청은 다시 사람에게 묻습니다."
         self.notice(msg, "warn")
         return msg
+
+    def set_design_questions(self, on: bool) -> str:
+        self.cfg.settings["design_questions"] = bool(on)
+        self.cfg.save_roles()
+        self.emit_status()
+        msg = "설계 질문 모드 " + ("켜짐: 초기 질문과 사이클 끝 중요 질문은 직접 답변을 기다립니다." if on else "꺼짐: 보류 질문 기록은 유지합니다.")
+        self.notice(msg)
+        return msg
+
+    def set_usage_retry(self, on: bool) -> str:
+        self.cfg.settings['usage_limit_retry'] = bool(on)
+        self.cfg.save_roles()
+        if not on:
+            self.usage.cancel()
+        self.emit_status()
+        return "사용량 한도 자동 대기·재개: " + ("켜짐" if on else "꺼짐 (대기 취소)")
+
+    async def run_agent_turn(self, ad, prompt):
+        return await self.usage.run(ad, prompt)
 
     # ================= 상태 =================
     def _on_event(self, ev: Event) -> None:
@@ -226,6 +249,12 @@ class Orchestrator:
             "max_turns": None if mt is None else mt + self.extra_turns,
             "mode": self.cfg.state.mode,
             "full_auto": self.full_auto,
+            "usage_limit_retry": self.usage.enabled,
+            "usage_waits": list(self.usage.waits.values()),
+            "design_questions": self.design.enabled,
+            "design_question_phase": self.design.state.get("phase", "idle"),
+            "design_question_count": len(self.design.state.get("pending", [])),
+            "design_question_text": (self.design.state.get("initial", "") if self.design.state.get("phase") == "awaiting_initial" else self.design.summary()),
             "auto": self.cfg.state.auto,
             "paused": not self.not_paused.is_set(),
             "pending_approvals": self.pending_approvals,
@@ -341,6 +370,7 @@ class Orchestrator:
         return self.reviewer
 
     async def close(self) -> None:
+        self.usage.cancel()
         try:
             await self.work.close()
         except Exception:
@@ -409,6 +439,8 @@ class Orchestrator:
             self._approval_activity[req.role] = (count - 1, state)
 
     async def _handle_approval(self, req: ApprovalRequest, policy: Policy | None = None) -> Decision:
+        if self.design.enabled and self.design.state.get("phase") in ("initial", "awaiting_initial"):
+            return read_only_decision(req, "초기 설계 질문")
         role = self.role_for(req.role)
         if policy is None:
             policy = self.policy
@@ -486,7 +518,7 @@ class Orchestrator:
         label = getattr(rev, 'label', self.cfg.main + ' (심사)')
         self.set_activity(label, 'reviewing', start=True)
         try:
-            result = await self._review_turn_wait(rev, prompt, timeout)
+            result = await self.usage.run(rev, prompt, lambda text: self._review_turn_wait(rev, text, timeout))
         except BaseException:
             self.set_activity(label, 'error', '심사 중단 또는 오류')
             raise
@@ -560,7 +592,7 @@ class Orchestrator:
                 if not self.cfg.state.task["waiting"]:
                     self._wait_task("사람 메시지에 대한 메인의 판단 대기")
                 target = self.cfg.main
-            nxt = (target, "human", str(n))
+            nxt = self.design.begin((target, "human", str(n)))
         return nxt
 
     async def serve(self) -> None:
@@ -602,7 +634,9 @@ class Orchestrator:
         self._startup_notices()
         self.work.start()
         try:
+            nxt = self.design.begin(nxt)
             await self._run_loop(nxt)
+            self.design.finish()
             if not self.cfg.state.task:  # 요청 하나가 끝났으면 다음 요청 전에 정리
                 self.mark_compaction_due(reason="요청 종료")
         finally:
@@ -859,7 +893,7 @@ class Orchestrator:
         def prepare(a: AgentAdapter) -> None:
             a.turn_kind = kind
             a.agreement_phase = task["phase"] if task else None
-            a.plan_read_only = bool(task and role_name != self.cfg.main
+            a.plan_read_only = kind == "design_questions" or bool(task and role_name != self.cfg.main
                                     and (task["phase"] in ("plan", "plan_review") or task["waiting"]))
             a.verification_command = (task["test_command"] if task and task["phase"] == "verify"
                                       and role_name == self.cfg.main else None)
@@ -884,7 +918,7 @@ class Orchestrator:
         self.bus.emit("turn_start", role_name, n=n, kind=kind, info=info)
         self.emit_status()
 
-        tr = await ad.run_turn(prompt)
+        tr = await self.run_agent_turn(ad, prompt)
         if not tr.ok and tr.context_overflow and not tr.interrupted and not self.stop_requested:
             # 입력 한도 초과: 같은 세션으로는 다시 해도 실패하므로 새 세션으로 한 번 자동 재시도
             self.notice(f"{role_name} 입력이 모델 한도를 넘었습니다. 새 세션으로 이 턴을 다시 실행합니다.", "warn",
@@ -892,7 +926,7 @@ class Orchestrator:
             try:
                 ad = await self._rotate_session(role_name, "입력 한도 초과 오류")
                 prepare(ad)
-                tr = await ad.run_turn(prompt)
+                tr = await self.run_agent_turn(ad, prompt)
             except Exception as e:
                 tr.error = f"{tr.error} / 새 세션 재시도 실패: {e}"
 
@@ -972,6 +1006,21 @@ class Orchestrator:
         if not tr.ok or tr.interrupted or self.stop_requested:
             self._wait_task(tr.error or "턴 중단")
             return None
+        if self.design.enabled:
+            if kind == "design_questions":
+                self.design.initial_answer(tr.full_text or tr.text or turn.body)
+                return None
+            questions = [v for k, v in turn.directives if k == "ASK_HUMAN"]
+            if questions:
+                added = [self.design.defer(role, q) for q in questions]
+                if self.cfg.state.task:
+                    self._wait_task("설계 질문 답변 대기: " + " / ".join(questions))
+                    return None
+                if not any(added):
+                    return None
+                return (self.cfg.main, "system", "중요 질문을 보류 목록에 저장했습니다. 답을 대신 정하지 마세요. "
+                        "그 결정과 독립적인 작업만 계속하고 더 할 일이 없으면 보류 사항을 요약하고 STATUS done으로 마치세요.\n"
+                        + self.design.summary())
         if self.cfg.state.task:
             task = self.cfg.state.task
             if role == task['role'] and task['phase'] == 'plan' and not task['waiting']:
@@ -1018,6 +1067,9 @@ class Orchestrator:
             if target not in self.cfg.roles or target == main:
                 others = ", ".join(r for r in self.cfg.roles if r != main) or "(없음)"
                 return (main, "system", f"'{target}' 역할은 위임할 수 없습니다. 가능한 역할: {others}. 다시 위임하거나 STATUS done 으로 마치세요.")
+            if self.design.blocked(target):
+                self.notice(f"{target}: 보류한 설계 질문에 실제 사용자 답변이 필요합니다.")
+                return None
             task = turn.directive("TASK") or f"DIALOGUE.md #{turn.n} 의 지시를 따르세요."
             self.task_history.append(_norm(task))
             if self.cfg.mode.agreement:
@@ -1162,6 +1214,9 @@ class Orchestrator:
             self.notice("합의 작업 취소: " + arg)
             self._finish_task("cancelled")
             return None
+        if role == main and action in ("RESUME", "AGREE", "ACCEPT") and (self.design.blocked(worker) or self.design.blocked(main)):
+            self._wait_task("중요 설계 질문에 대한 실제 사용자 답변 대기")
+            return None
         if action == "RESUME" and role == main and not arg:
             if not task["waiting"] or phase not in ("plan", "implement"):
                 return invalid("RESUME는 대기 중 plan/implement에서만 가능합니다.")
@@ -1173,6 +1228,9 @@ class Orchestrator:
             return (worker, phase, f"메인 #{turn.n} RESUME. 대기 사유: {reason}")
         if role == worker and action == "REPORT" and arg.split(maxsplit=1)[0:1] == ["blocked"]:
             self._wait_task(f"작업자 #{turn.n}: {arg}")
+            if self.design.enabled:
+                self.design.defer(role, arg)
+                return None
             if self.full_auto:
                 return self._autopilot_question(role, arg, resume=True)
             self.bus.emit("ask", worker, text=arg)
@@ -1468,6 +1526,7 @@ class Orchestrator:
 
     async def stop(self) -> None:
         self.stop_requested = True
+        self.usage.cancel()
         self._wait_task("사람이 /stop으로 중단했습니다")
         self.not_paused.set()
         if self.running_role and self.running_role in self.adapters:

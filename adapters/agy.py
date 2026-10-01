@@ -22,6 +22,7 @@ from ..core.procs import WINDOWS, close_transport, group_kwargs, interrupt_tree,
     terminate_tree
 from ..core.policy import PLAN_DENY_TEXT, ApprovalRequest, read_only_command, tool_matches
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
+from ..core.usage_wait import classify
 
 HOOK_NAME = "duet-policy"
 HOOK_SCRIPT = Path(__file__).with_name("agy_hook.py")
@@ -285,6 +286,7 @@ class AgyAdapter(AgentAdapter):
                 elif status.upper() not in ("SUCCESS", ""):
                     result.ok = False
                     result.error = str(final.get("error") or final.get("message") or status)
+                    classify(result, final.get("error") if isinstance(final.get("error"), dict) else final)
                 denied = final.get("denied_actions") or []
                 if denied:
                     self.emit("notice", level="warn",
@@ -318,7 +320,7 @@ class AgyAdapter(AgentAdapter):
             result.context_overflow = True
         if result.tokens:
             self.bus.emit("usage", self.label, cost_usd=0.0, tokens=result.tokens)
-        return result
+        return classify(result)
 
     def _on_step(self, st: dict, partial: dict[int, list[str]], texts: list[str]) -> None:
         idx = int(st.get("step_index") or 0)

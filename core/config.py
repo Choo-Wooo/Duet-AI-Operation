@@ -144,6 +144,7 @@ class State:
     fork_on_resume: list[str] = field(default_factory=list)
     reviewer_fork_on_resume: list[str] = field(default_factory=list)
     task: dict | None = None
+    design_questions: dict = field(default_factory=dict)
 
 
 class Config:
@@ -190,7 +191,9 @@ class Config:
                                # 대화 압축 시간 한도(초). 넘기면 실패로 보고 진행을 계속한다
                                "compact_timeout_sec": 300,
                                # 전권 자동 수락: 모드와 상관없이 승인·선택을 사람에게 묻지 않음 (autopilot_deny 만 막음)
-                               "full_auto": False}
+                               "full_auto": False, "design_questions": False,
+                               "usage_limit_retry": False, "usage_limit_wait_sec": 18000,
+                               "usage_limit_max_retries": 3}
         self.runtime: dict = {}  # 이번 실행에만 쓰는 값 (예산 등, 저장 안 함)
 
     # ---------- 로드 ----------

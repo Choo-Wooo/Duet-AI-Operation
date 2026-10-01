@@ -16,6 +16,7 @@ from ..core.procs import group_kwargs, reap
 from ..core.policy import ApprovalRequest, Decision
 from ..core.prompts import REVIEW_SYSTEM
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
+from ..core.usage_wait import classify
 
 
 class RpcError(Exception):
@@ -200,6 +201,16 @@ class CodexAdapter(AgentAdapter):
         elif method == "thread/compacted":
             if self._compact_fut and not self._compact_fut.done():
                 self._compact_fut.set_result(True)
+        elif method == "account/rateLimits/updated":
+            limits = p.get("rateLimits") or {}
+            stamps = []
+            for window in (limits.get("primary"), limits.get("secondary")):
+                if isinstance(window, dict) and isinstance(window.get("usedPercent"), (int, float)) and window["usedPercent"] >= 100:
+                    from ..core.usage_wait import reset_time
+                    stamp = reset_time(window.get("resetsAt"))
+                    if stamp:
+                        stamps.append(stamp)
+            self._usage_reset_at = max(stamps) if stamps else None
         elif method == "error":
             err = p.get("error") or {}
             msg = err.get("message") or "codex 오류"
@@ -310,6 +321,7 @@ class CodexAdapter(AgentAdapter):
                 result.ok = False
                 err = turn.get("error") or {}
                 result.error = err.get("message") or "turn failed"
+                classify(result, err)
                 if err.get("codexErrorInfo") == "contextWindowExceeded":
                     result.context_overflow = True
             elif status == "interrupted":
@@ -317,6 +329,7 @@ class CodexAdapter(AgentAdapter):
         except Exception as e:
             result.ok = False
             result.error = f"{type(e).__name__}: {e}"
+            classify(result, getattr(e, "err", None))
             if self.plan_read_only:
                 result.error = "REPORT deviation: plan readOnly 턴을 실행할 수 없습니다. " + result.error
         finally:
@@ -331,6 +344,9 @@ class CodexAdapter(AgentAdapter):
         result.tokens = used
         if used:
             self.bus.emit("usage", self.label, cost_usd=0.0, tokens=used)
+        classify(result)
+        if result.usage_limited and result.usage_reset_at is None:
+            result.usage_reset_at = getattr(self, "_usage_reset_at", None)
         return result
 
     async def compact(self, instructions: str = "") -> bool:
