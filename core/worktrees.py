@@ -18,6 +18,8 @@ from .fsutil import is_link, link_dir, unlink_dir
 from .gitops import Git, temporary_index
 from .procs import run_text
 
+WORK_LOG = re.compile(r"docs/work/[^/]+\.md")  # duet 이 메인 트리에 쓰는 작업 기록
+
 BRANCH_PREFIX = "duet/work/"
 WORKTREE_DIR = Path(".duet") / "worktrees"
 # 워크트리에서도 쓸 수 있게 원본의 의존성 폴더를 링크 (git 에서 무시되는 것만)
@@ -220,6 +222,23 @@ class Worktrees:
             return self._commit_scoped(path, message) is not None
         self.git("commit", "-q", "--no-verify", "-m", message, cwd=path, check=True)
         return True
+
+    def revert_work_logs(self, path: Path, base: str) -> list[str]:
+        """작업 브랜치에서 바뀐 duet 작업 기록(docs/work/<id>.md)을 기준 시점으로 되돌린다.
+
+        이 파일들은 duet 이 메인 작업 트리에 계속 덧붙이므로, 작업자가 워크트리에서 고치면 병합 때 충돌한다.
+        하위 폴더(docs/work/<이름>/...)는 작업 산출물일 수 있으니 건드리지 않는다. 되돌린 경로 목록을 돌려준다."""
+        mb = self.git("merge-base", base, "HEAD", cwd=path, check=True).stdout.strip()
+        self.git("add", "-A", "-N", "--", "docs/work", cwd=path)
+        r = self.git("diff", "--relative", "--name-only", "-z", mb, "--", "docs/work", cwd=path)
+        names = [n for n in r.stdout.split("\0") if WORK_LOG.fullmatch(n)]
+        for name in names:
+            if self.git("cat-file", "-e", f"{mb}:./{name}", cwd=path).returncode == 0:
+                self.git("checkout", mb, "--", name, cwd=path, check=True)
+            else:
+                self.git("rm", "-q", "-f", "--cached", "--ignore-unmatch", "--", name, cwd=path)
+                (path / name).unlink(missing_ok=True)
+        return names
 
     def diff_stat(self, path: Path, base: str) -> str:
         base = self.git("merge-base", base, "HEAD", cwd=path, check=True).stdout.strip()

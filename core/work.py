@@ -47,7 +47,8 @@ WORK_SYSTEM = BACKGROUND_WAIT + """
 역할: {brief}
 작업 폴더는 이 작업 전용 git 워크트리입니다 (브랜치 {branch}, 기준 브랜치 {base}).
 - 이 폴더 안의 파일만 고치세요. git commit/merge/push 는 하지 마세요 (duet 이 커밋·병합합니다).
-- DIALOGUE.md 는 쓰지 마세요. 당신의 채팅 응답을 duet 이 docs/work/{id}.md 에 기록합니다.
+- DIALOGUE.md 와 docs/work/*.md 는 쓰지 마세요. 당신의 채팅 응답을 duet 이 메인 작업 트리의 docs/work/{id}.md 에 기록합니다.
+  워크트리에서 이 파일들을 고쳐도 병합 때 되돌립니다. 보고는 응답 본문에, 산출물은 합의한 파일 경로에 쓰세요.
 - 같은 시간에 다른 세션들이 다른 작업을 하고 있습니다. 합의한 파일 범위 밖을 고치지 마세요.
 - 사람에게 직접 묻는 도구는 쓰지 말고 ASK_HUMAN 지시문을 쓰세요.
 
@@ -160,12 +161,40 @@ def plain_directives(text: str, allowed: tuple[str, ...]) -> list[tuple[str, str
     return []
 
 
+_KEY_LINE = re.compile(r"^(?P<lead>\s*(?:-\s+)?)(?P<key>[A-Za-z_][\w-]*):[ \t]+(?P<val>\S.*?)\s*$")
+
+
+def _quote_scalars(body: str) -> str:
+    """`task: 설명: 내용` 처럼 값에 ': ' 가 섞인 줄의 값을 따옴표로 감싼다 (이미 따옴표·블록·흐름 값이면 그대로)."""
+    out = []
+    for line in body.splitlines():
+        m = _KEY_LINE.match(line)
+        val = m and m.group("val")
+        if m and (": " in val or " #" in val) and val[0] not in "'\"|>[{&*!":
+            line = f"{m.group('lead')}{m.group('key')}: '" + val.replace("'", "''") + "'"
+        out.append(line)
+    return "\n".join(out)
+
+
 def parse_work_block(text: str | None) -> list[dict] | None:
     """응답에서 마지막 duet-work 블록을 찾아 목록으로. 블록이 없으면 None."""
     found = list(WORK_BLOCK.finditer(text or ""))
     if not found:
         return None
-    data = yaml.safe_load(found[-1].group("body")) or []
+    body = found[-1].group("body")
+    try:
+        data = yaml.safe_load(body) or []
+    except yaml.YAMLError as e:
+        fixed = _quote_scalars(body)
+        try:
+            data = yaml.safe_load(fixed) or [] if fixed != body else None
+        except yaml.YAMLError:
+            data = None
+        if data is None:
+            mark = getattr(e, "problem_mark", None)
+            where = f" ({mark.line + 1}행)" if mark else ""
+            raise ValueError(f"YAML 오류{where}: {getattr(e, 'problem', None) or e}. "
+                             "값에 ': ' 나 '#' 가 들어가면 따옴표로 감싸거나 `task: |` 블록으로 쓰세요") from None
     if isinstance(data, dict):
         data = data.get("work") or data.get("items") or [data]
     if not isinstance(data, list):
@@ -852,6 +881,10 @@ class WorkBoard:
         """True = 병합 완료. 문자열 = 작업자에게 돌려줄 재작업 안내."""
         async with self.merge_lock:
             self._touch(it, "merging")
+            reverted = await asyncio.to_thread(self.wt.revert_work_logs, path, self.base)
+            if reverted:
+                self._thread(it, "duet", "작업 기록 파일은 duet 이 관리하므로 워크트리의 변경을 되돌렸습니다: "
+                             + ", ".join(reverted))
             await asyncio.to_thread(self.wt.commit_all, path, f"duet work {it.id}: {it.task.splitlines()[0][:60]}")
             conflicts = await asyncio.to_thread(self.wt.merge_base_into, path, self.base)
             if conflicts:

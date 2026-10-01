@@ -23,7 +23,9 @@ from .prompts import compact_instructions, opinion_prompt, review_prompt, system
 from .textutil import extract_memory, save_memory, summarize_paths
 from .ui import HumanUI
 from .saves import delete_save, git_head, list_saves, read_save, write_save
-from .work import REPORT_TRIGGER, WorkBoard, parse_work_block
+from .work import REPORT_TRIGGER, WORK_BLOCK, WorkBoard, parse_work_block
+
+_ACCEPT_DIRECTIVE = re.compile(r"<!--\s*duet:\s*ACCEPT\b[^>]*?-->", re.I)
 
 Next = tuple[str, str, str]  # (role, kind, info)
 
@@ -1033,7 +1035,11 @@ class Orchestrator:
             return await self._decide_task(role, kind, turn)
         flow_commands = {"PLAN", "AGREE", "REVISE", "ACCEPT", "REWORK", "RESUME", "CANCEL"}
         if any(k in flow_commands for k, _ in turn.directives):
-            return (role, "system", "활성 합의 task가 없습니다. 메인의 DELEGATE로 작업을 시작하세요.")
+            if not (role == self.cfg.main and (WORK_BLOCK.search(tr.full_text or tr.text or "")
+                                               or WORK_BLOCK.search(turn.body or ""))):
+                return (role, "system", "활성 합의 task가 없습니다. 메인의 DELEGATE로 작업을 시작하세요.")
+            # 작업 블록이 함께 왔으면 남은 흐름 지시문은 무시하고 블록을 처리한다.
+            self.notice("활성 합의 task가 없어 흐름 지시문은 무시하고 같은 턴의 duet-work 블록을 처리합니다.", "warn")
         for name, arg in turn.directives:
             if name == "PROPOSE_ROLE":
                 await self._propose_role(arg)
@@ -1283,8 +1289,11 @@ class Orchestrator:
                 return (worker, "implement", f"메인 #{turn.n} 재작업 요청: {arg}. 범위 변경은 deviation으로 보고하세요.")
             if action == "ACCEPT" and not arg:
                 self._finish_task("accepted")
-                if next_delegate:
-                    body = "\n".join(f"<!-- duet: {k} {v} -->" for k, v in turn.directives if k != "ACCEPT")
+                if next_delegate or WORK_BLOCK.search(turn.body or ""):
+                    # 같은 턴의 다음 DELEGATE·duet-work 블록은 완료 후 일반 경로로 처리한다.
+                    body = _ACCEPT_DIRECTIVE.sub("", turn.body or "")
+                    if not WORK_BLOCK.search(body):
+                        body = "\n".join(f"<!-- duet: {k} {v} -->" for k, v in turn.directives if k != "ACCEPT")
                     return await self._decide(role, kind, TurnResult(""),
                                               Turn(role, turn.n, turn.rest, turn.start, turn.end, body))
                 return None

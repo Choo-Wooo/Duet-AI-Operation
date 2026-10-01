@@ -1,6 +1,7 @@
 """Claude Code 어댑터 — claude-agent-sdk (설치된 claude CLI 를 그대로 구동)."""
 from __future__ import annotations
 
+import os
 import json
 import asyncio
 import inspect
@@ -37,6 +38,7 @@ def _context_size(usage) -> int:
 
 FILE_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
 READONLY_TOOLS = ["Read", "Grep", "Glob", "LS"]
+MAX_BUFFER = int(os.environ.get("DUET_CLAUDE_MAX_BUFFER", 64 * 1024 * 1024))  # SDK 메시지 한 줄 최대 크기
 
 
 def _tool_detail(name: str, inp: dict) -> str:
@@ -97,6 +99,9 @@ class ClaudeAdapter(AgentAdapter):
                 self.emit("notice", text="Claude SDK가 세션 분기를 지원하지 않아 resume합니다. "
                           "저장 시점 이후 기억이 포함될 수 있습니다.", level="warn")
                 self.fork_session = False
+        if "max_buffer_size" in getattr(ClaudeAgentOptions, "__dataclass_fields__", {}):
+            # 큰 도구 결과(이미지·긴 파일)가 한 줄 JSON 으로 오면 기본 1MB 버퍼를 넘어 턴이 깨진다
+            kw["max_buffer_size"] = MAX_BUFFER
         cli = which("claude")
         if cli:
             kw["cli_path"] = cli  # 설치된 claude 중 가장 최신 버전 (설정·로그인은 ~/.claude 그대로)
