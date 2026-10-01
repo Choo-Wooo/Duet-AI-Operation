@@ -14,6 +14,40 @@ import sys
 
 WINDOWS = os.name == "nt"
 
+# 새 프로세스 그룹으로 띄운 하위 프로세스(그룹 id = pid). 정상 정리 경로를 못 거치고 duet 이 끝나도
+# (SSH 끊김의 SIGHUP, 예외 종료) 남은 자손이 고아로 살아남지 않게 종료 직전에 한꺼번에 정리한다.
+_GROUPS: set[int] = set()
+
+
+def track(proc) -> None:
+    """group_kwargs() 로 띄운 프로세스를 정리 대상에 올린다."""
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        _GROUPS.add(pid)
+
+
+def sweep(proc) -> None:
+    """끝난 프로세스의 그룹에 남은 자손(백그라운드로 띄운 서버·MCP 등)을 정리한다. POSIX 전용.
+
+    Windows 는 그룹 리더가 끝나면 taskkill /T 로 자손을 찾을 수 없고 pid 재사용 위험이 있어 하지 않는다."""
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    _GROUPS.discard(pid)
+    if WINDOWS:
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def kill_all_groups() -> None:
+    """추적 중인 모든 하위 프로세스 그룹을 강제 종료한다 (종료 직전 안전망)."""
+    for pid in list(_GROUPS):
+        _GROUPS.discard(pid)
+        kill_tree(pid)
+
 
 def group_kwargs() -> dict:
     """자손까지 한꺼번에 멈출 수 있게 새 프로세스 그룹으로 띄우는 인자."""
@@ -37,6 +71,7 @@ def _taskkill(pid: int) -> None:
 
 def kill_tree(pid: int) -> None:
     """프로세스와 자손을 강제 종료한다. 이미 끝났으면 조용히 넘어간다."""
+    _GROUPS.discard(pid)
     if WINDOWS:
         _taskkill(pid)
         return
@@ -95,7 +130,9 @@ def close_transport(proc: asyncio.subprocess.Process) -> None:
 
 
 async def reap(proc: asyncio.subprocess.Process, timeout: float = 5) -> None:
-    """자손까지 강제 종료하고 기다린 뒤 파이프를 닫는다."""
+    """자손까지 강제 종료하고 기다린 뒤 파이프를 닫는다. 리더가 먼저 끝났어도 그룹에 남은 자손을 정리한다."""
+    if proc.returncode is not None:
+        sweep(proc)
     if proc.returncode is None:
         kill_tree(proc.pid)
         try:
@@ -105,6 +142,7 @@ async def reap(proc: asyncio.subprocess.Process, timeout: float = 5) -> None:
                 proc.kill()
             except ProcessLookupError:
                 pass
+    _GROUPS.discard(getattr(proc, "pid", None))
     close_transport(proc)
 
 
@@ -163,8 +201,11 @@ async def create_shell(command: str, **kw) -> asyncio.subprocess.Process:
     kw = {**group_kwargs(), **kw}
     bash = git_bash()
     if bash:
-        return await asyncio.create_subprocess_exec(bash, "-c", command, **kw)
-    return await asyncio.create_subprocess_shell(command, **kw)
+        proc = await asyncio.create_subprocess_exec(bash, "-c", command, **kw)
+    else:
+        proc = await asyncio.create_subprocess_shell(command, **kw)
+    track(proc)
+    return proc
 
 
 def pid_alive(pid: int) -> bool:

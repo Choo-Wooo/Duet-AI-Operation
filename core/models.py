@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from .clis import which
-from .procs import close_transport, group_kwargs, reap
+from .procs import close_transport, group_kwargs, reap, sweep, track
 
 
 def parse_agy_models(text: str) -> list[dict]:
@@ -37,11 +37,13 @@ async def agy_models(timeout: float = 30) -> list[dict]:
     proc = await asyncio.create_subprocess_exec(exe, "models", stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL,
                                                 **group_kwargs())
+    track(proc)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except BaseException:  # 시간 초과·취소: 프로세스를 남기지 않는다
         await reap(proc)
         raise
+    sweep(proc)
     close_transport(proc)
     models = parse_agy_models(out.decode(errors="replace"))
     if proc.returncode or not models:
@@ -83,6 +85,7 @@ async def codex_models() -> list[dict]:
     proc = await asyncio.create_subprocess_exec(
         exe, "app-server", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024, **group_kwargs())
+    track(proc)
 
     async def call(rid: int, method: str, params: dict) -> dict:
         proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}) + "\n").encode())

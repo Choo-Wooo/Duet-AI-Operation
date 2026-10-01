@@ -26,7 +26,7 @@ import yaml
 from .agreement import clean_command, parse_plan
 from .dialogue import extract_directives
 from .policy import ApprovalRequest, Decision, Policy, AUTO, read_only_decision
-from .procs import close_transport, create_shell, kill_tree
+from .procs import close_transport, create_shell, kill_tree, sweep
 from .prompts import BACKGROUND_WAIT
 from .design_questions import GUIDE
 from .worktrees import GitError, Worktrees, valid_id
@@ -822,6 +822,7 @@ class WorkBoard:
         except asyncio.CancelledError:
             await self._kill_test_group(proc)
             raise
+        sweep(proc)  # 테스트가 백그라운드로 띄운 서버·감시 프로세스가 남지 않게
         close_transport(proc)
         text = out.decode(errors="replace")
         self.orch.bus.emit("tool_output", f"duet#{it.id}", text=text[-800:], ok=proc.returncode == 0)

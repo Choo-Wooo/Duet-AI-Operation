@@ -12,7 +12,7 @@ from typing import Any
 
 from .. import __version__
 from ..core.clis import which
-from ..core.procs import group_kwargs, reap
+from ..core.procs import group_kwargs, reap, track
 from ..core.policy import ApprovalRequest, Decision
 from ..core.prompts import REVIEW_SYSTEM
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
@@ -49,6 +49,7 @@ class CodexAdapter(AgentAdapter):
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=str(self.project), limit=64 * 1024 * 1024, env=os.environ.copy(), **group_kwargs(),
         )
+        track(self.proc)
         self._reader = asyncio.create_task(self._read_loop())
         self._err_reader = asyncio.create_task(self._read_stderr())
         await self.request("initialize", {

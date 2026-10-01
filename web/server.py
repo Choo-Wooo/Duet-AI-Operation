@@ -612,8 +612,8 @@ async def serve(cfg: Config, bus: EventBus, msgs: list[str], fake: bool, first: 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     import signal
-    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
-        if sig is None:
+    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None), getattr(signal, "SIGBREAK", None)):
+        if sig is None or (sig == getattr(signal, "SIGHUP", None) and signal.getsignal(sig) is signal.SIG_IGN):  # nohup 이면 그대로
             continue
         try:
             loop.add_signal_handler(sig, stop.set)

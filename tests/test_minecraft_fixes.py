@@ -118,3 +118,107 @@ def test_status_log_throttled(tmp_path, monkeypatch):
     bus.close()
     rows = [json.loads(x) for f in tmp_path.glob("*.jsonl") for x in f.read_text().splitlines()]
     assert [(r["event"], r["data"].get("a")) for r in rows] == [("status", 1), ("notice", None), ("status", 3)]
+
+
+# ---------------------------------------------------------------- 하위 프로세스가 고아로 남지 않는지
+import os  # noqa: E402
+import signal  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+
+from duet.core import procs  # noqa: E402
+
+posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX 프로세스 그룹")
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # 좀비(부모가 아직 거두지 않음)는 죽은 것으로 본다
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().split(")")[-1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def _wait_dead(pid, limit=5.0):
+    end = time.time() + limit
+    while time.time() < end and _alive(pid):
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+BG = "sleep 300 >/dev/null 2>&1 & echo $! > {f}"
+
+
+@posix
+def test_reap_sweeps_background_children_after_leader_exits(tmp_path):
+    pidf = tmp_path / "bg.pid"
+
+    async def go():
+        proc = await asyncio.create_subprocess_exec("sh", "-c", BG.format(f=pidf), **procs.group_kwargs())
+        procs.track(proc)
+        await proc.wait()
+        bg = int(pidf.read_text())
+        assert _alive(bg)  # 리더는 끝났지만 자손은 살아 있다
+        await procs.reap(proc)
+        return bg
+    bg = asyncio.run(go())
+    assert _wait_dead(bg) and bg not in procs._GROUPS
+
+
+@posix
+def test_kill_all_groups_is_exit_safety_net(tmp_path):
+    pidf = tmp_path / "bg.pid"
+
+    async def go():
+        proc = await procs.create_shell(BG.format(f=pidf) + "; sleep 300")
+        for _ in range(100):
+            if pidf.exists() and pidf.read_text().strip():
+                break
+            await asyncio.sleep(0.02)
+        assert proc.pid in procs._GROUPS
+        procs.kill_all_groups()
+        await proc.wait()
+        procs.close_transport(proc)
+        return int(pidf.read_text())
+    bg = asyncio.run(go())
+    assert _wait_dead(bg) and not procs._GROUPS
+
+
+@posix
+def test_work_test_command_background_server_is_cleaned(orch, tmp_path, monkeypatch):  # noqa: F811
+    from duet.core import work as work_mod
+    from duet.core.work import WorkItem
+    monkeypatch.setattr(work_mod.Policy, "classify", lambda self, req, role: (work_mod.AUTO, "시험"))
+    pidf = tmp_path / "srv.pid"
+    orch.cfg.settings["work_test_timeout"] = 30
+    it = WorkItem(id="t", role="implementer", task="x")
+
+    async def go():
+        return await orch.work._run_test_active(it, tmp_path, BG.format(f=pidf) + "; true")
+    code, _ = asyncio.run(go())
+    assert code == 0
+    assert _wait_dead(int(pidf.read_text()))
+
+
+@posix
+def test_sighup_handler_respects_nohup(monkeypatch):
+    from duet import app
+    monkeypatch.setattr("atexit.register", lambda f: None)
+    old = signal.getsignal(signal.SIGHUP)
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        app._install_exit_cleanup()
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        app._install_exit_cleanup()
+        h = signal.getsignal(signal.SIGHUP)
+        assert callable(h) and h not in (signal.SIG_DFL, signal.SIG_IGN)
+        with pytest.raises(KeyboardInterrupt):
+            h(signal.SIGHUP, None)
+    finally:
+        signal.signal(signal.SIGHUP, old)

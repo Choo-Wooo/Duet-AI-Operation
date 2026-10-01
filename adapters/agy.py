@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.clis import which
-from ..core.procs import WINDOWS, close_transport, group_kwargs, interrupt_tree, interrupted_code, kill_tree, \
+from ..core.procs import WINDOWS, close_transport, group_kwargs, sweep, track, interrupt_tree, interrupted_code, kill_tree, \
     terminate_tree
 from ..core.policy import PLAN_DENY_TEXT, ApprovalRequest, read_only_command, tool_matches
 from .base import AgentAdapter, TurnResult, clip, is_context_overflow
@@ -240,6 +240,7 @@ class AgyAdapter(AgentAdapter):
                 *self._argv(prompt), cwd=str(self.project), env=env, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=64 * 1024 * 1024,
                 **group_kwargs())
+            track(self.proc)
             err_task = asyncio.create_task(self._read_stderr(self.proc))
             final: dict | None = None
             assert self.proc.stdout
@@ -311,6 +312,7 @@ class AgyAdapter(AgentAdapter):
                 await asyncio.gather(err_task, return_exceptions=True)
             self.busy = False
             if self.proc is not None and self.proc.returncode is not None:
+                sweep(self.proc)  # 턴 중에 띄운 백그라운드 자손 정리
                 close_transport(self.proc)
             self.proc = None
         result.text = texts[-1] if texts else ""
