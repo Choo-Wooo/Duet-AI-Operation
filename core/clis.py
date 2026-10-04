@@ -10,11 +10,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .procs import WINDOWS, hidden_kwargs
 
 HOME = Path.home()
+MAC_APP_ROOTS = [Path("/Applications"), HOME / "Applications"]
 EXTRA_DIRS = [
     HOME / ".local" / "bin",
     HOME / ".claude" / "local",
@@ -71,6 +73,15 @@ def candidates(name: str) -> list[str]:
                 rp = str(p)
                 if rp not in found:
                     found.append(rp)
+    # 터미널 PATH 에 없는 데스크톱 앱 번들도 버전 비교에 포함한다.
+    if name == "codex" and sys.platform == "darwin":
+        for root in MAC_APP_ROOTS:
+            for app in ("ChatGPT.app", "Codex.app"):
+                resources = root / app / "Contents" / "Resources"
+                for rel in ("codex", "codex-cli/CodexCLI.app/Contents/MacOS/codex"):
+                    p = resources / rel
+                    if p.is_file() and os.access(p, os.X_OK) and str(p) not in found:
+                        found.append(str(p))
     # nvm 설치본
     nvm = HOME / ".nvm" / "versions" / "node"
     if nvm.is_dir():

@@ -13,7 +13,7 @@ import re
 import time
 from pathlib import Path
 
-from .clis import which
+from .clis import resolve, which
 from .procs import close_transport, group_kwargs, reap, sweep, track
 
 
@@ -152,6 +152,8 @@ def read_cache(dotduet: Path) -> dict | None:
 
 
 async def refresh(dotduet: Path, clis: list[str]) -> dict:
+    # CLI 설치·앱 업데이트 이후 다시 조회하면 실행 파일도 다시 고른다.
+    resolve.cache_clear()
     data = {"updated": time.time(), "clis": await list_all(clis)}
     try:
         cache_path(dotduet).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
