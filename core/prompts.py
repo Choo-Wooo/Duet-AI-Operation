@@ -132,10 +132,10 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
         lines.append("체크포인트 턴입니다. 지금까지의 결정 사항, 남은 일, 열린 질문을 요약하세요. "
                      "이 요약 이전의 대화는 보관 폴더로 옮겨지고, 이 요약이 이후 대화의 출발점이 됩니다. "
                      "이 턴에는 지시문을 쓰지 마세요. 진행 중이던 흐름은 오케스트레이터가 이어갑니다.")
-    elif kind == "system":
+    elif kind in ("system", "design_questions"):
         lines.append(info)
     task = cfg.state.task
-    plan_only = bool(task and role.name != cfg.main
+    plan_only = kind == "design_questions" or bool(task and role.name != cfg.main
                      and (task["phase"] in ("plan", "plan_review") or task["waiting"]))
     if task:
         lines.append("현재 합의 작업: " + task_status(task))
@@ -176,6 +176,12 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
                      "WebFetch/WebSearch는 기존 권한 정책을 따릅니다.")
     else:
         lines.append(f"턴을 마치면 DIALOGUE.md 맨 끝에 `## [{role.name}] #{n}` 헤더로 당신의 턴을 추가하세요.")
+    if cfg.settings.get("design_questions"):
+        from .design_questions import GUIDE
+        lines.append(GUIDE)
+        pending = cfg.state.design_questions.get("pending", [])
+        if pending:
+            lines.append("미해결 설계 질문(답변 전 관련 작업 보류):\n" + "\n".join(q["role"] + ": " + q["question"] for q in pending))
     return "\n".join(lines)
 
 
