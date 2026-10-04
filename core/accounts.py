@@ -9,7 +9,7 @@ import json
 import os
 
 from .clis import which
-from .procs import group_kwargs, install_asyncio_policy, reap
+from .procs import group_kwargs, install_asyncio_policy, reap, track
 
 PLAN_NAMES = {
     "free": "Free", "go": "Go", "plus": "Plus", "pro": "Pro", "prolite": "Pro Lite", "team": "Team",
@@ -54,6 +54,7 @@ async def _codex_account() -> str:
     proc = await asyncio.create_subprocess_exec(
         exe, "app-server", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024, **group_kwargs())
+    track(proc)
 
     async def call(rid: int, method: str, params: dict) -> dict:
         proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}) + "\n").encode())

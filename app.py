@@ -134,11 +134,31 @@ def _bench_line(ev) -> str | None:
     return fmt_event(ev)
 
 
+def _install_exit_cleanup() -> None:
+    """어떤 경로로 끝나든 duet 이 띄운 하위 프로세스 그룹(codex app-server, 테스트, MCP 등)을 남기지 않는다.
+
+    하위 프로세스는 새 세션으로 띄우므로 터미널·SSH 가 끊겨도(SIGHUP) 함께 죽지 않는다. 정리하지 않으면
+    고아로 남아 포트와 연결을 계속 쥔다. SIGHUP 은 Ctrl+C 처럼 정상 종료 경로로 돌린다."""
+    import atexit
+    import signal
+    from .core.procs import kill_all_groups
+    atexit.register(kill_all_groups)
+    hup = getattr(signal, "SIGHUP", None)
+    if hup is not None and signal.getsignal(hup) is signal.SIG_DFL:  # nohup 으로 띄웠으면(SIG_IGN) 그대로 둔다
+        def on_hup(*_):
+            raise KeyboardInterrupt
+        try:
+            signal.signal(hup, on_hup)
+        except (ValueError, OSError):
+            pass
+
+
 def main(duet_dir: Path, project: Path, argv: list[str]) -> int:
     # Claude Code 안에서 실행된 경우 그 세션 정보가 하위 claude 로 새지 않게 한다
     for key in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION"):
         os.environ.pop(key, None)
     args = parse_args(argv)
+    _install_exit_cleanup()
     if args.list_saves:
         try:
             print(format_saves(list_saves(Config(project))))

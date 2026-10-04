@@ -24,6 +24,9 @@ from typing import Any, Callable
 #   phase        합의 단계 전이        {task_id, from, to}
 
 
+STATUS_LOG_INTERVAL = 30.0  # 초
+
+
 @dataclass
 class Event:
     kind: str
@@ -36,6 +39,8 @@ class EventBus:
     def __init__(self, log_dir: Path | None = None):
         self._subs: list[Callable[[Event], None]] = []
         self._log_file = None
+        self._status_sig: int | None = None
+        self._status_ts = 0.0
         if log_dir:
             log_dir.mkdir(parents=True, exist_ok=True)
             self._log_file = open(log_dir / (time.strftime("%Y%m%d") + ".jsonl"), "a", encoding="utf-8")
@@ -45,7 +50,7 @@ class EventBus:
 
     def emit(self, kind: str, role: str | None = None, /, **data: Any) -> Event:
         ev = Event(kind, role, data)
-        if self._log_file:
+        if self._log_file and self._should_log(ev):
             try:
                 self._log_file.write(json.dumps(
                     {"ts": ev.ts, "event": kind, "role": role, "data": data}, ensure_ascii=False, default=str) + "\n")
@@ -58,6 +63,20 @@ class EventBus:
             except Exception:
                 pass
         return ev
+
+    def _should_log(self, ev: Event) -> bool:
+        """status 는 전체 상태 스냅샷(수십 KB)이라 자주 오면 로그가 수백 MB 로 커진다.
+        내용이 바뀌었고 마지막 기록 뒤 STATUS_LOG_INTERVAL 초가 지났을 때만 남긴다."""
+        if ev.kind != "status":
+            return True
+        try:
+            sig = hash(json.dumps(ev.data, sort_keys=True, default=str))
+        except Exception:
+            return True
+        if sig == self._status_sig or ev.ts - self._status_ts < STATUS_LOG_INTERVAL:
+            return False
+        self._status_sig, self._status_ts = sig, ev.ts
+        return True
 
     def close(self) -> None:
         if self._log_file:
