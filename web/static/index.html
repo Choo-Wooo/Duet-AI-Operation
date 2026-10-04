@@ -268,7 +268,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 
       <div class="composer" id="composer">
         <select id="target" title="받는 대상"></select>
-        <textarea id="input" rows="2" placeholder="설계자에게 메시지 (Enter 전송, Shift+Enter 줄바꿈, /help 명령어)"></textarea>
+        <textarea id="input" rows="2" placeholder="Enter 전송 · Ctrl+Enter 현재 턴에 전달 · Shift+Enter 줄바꿈 · /help"></textarea>
         <button class="primary" id="send">보내기</button>
       </div>
     </main>
@@ -796,14 +796,23 @@ document.querySelectorAll("#nav button").forEach(b => b.onclick = () => {
   trackComposer();
   docViewer.setOpen(b.dataset.v==='docs');
 });
-function sendInput() {
+function sendInput(immediate = false) {
   const t = $("#input").value.trim(); if (!t) return;
   const to = $("#target").value;
-  send(to && !t.startsWith("/") ? {type: "input", text: t, to} : {type: "input", text: t});
+  const msg = {type: "input", text: t};
+  if (!t.startsWith("/")) {
+    if (to) msg.to = to;
+    if (immediate === true) msg.immediate = true;
+  }
+  send(msg);
   $("#input").value = "";
 }
-$("#send").onclick = sendInput;
-$("#input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendInput(); } });
+$("#send").onclick = () => sendInput();
+$("#input").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault(); sendInput(e.ctrlKey || e.metaKey);
+  }
+});
 $("#askSend").onclick = sendAsk;
 $("#askInput").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendAsk(); } });
 $("#askReset").onclick = () => { send({type: "ask_reset", role: $("#askRole").value}); $("#askLog").innerHTML = ""; };

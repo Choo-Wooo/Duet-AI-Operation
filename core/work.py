@@ -444,6 +444,22 @@ class WorkBoard:
             return self.resume(wid) + " — 메시지는 다음 턴에 전달합니다."
         return f"{wid} 에 전달 예약 (다음 턴)"
 
+    async def steer(self, wid: str, text: str) -> str:
+        it = self.items.get(wid)
+        if not it or it.status in DONE:
+            return f"작업 '{wid}' 가 없습니다."
+        for key in (wid, wid + "@arch"):
+            ad = self.adapters.get(key)
+            if not ad or not ad.busy:
+                continue
+            try:
+                if await ad.steer(text):
+                    self._thread(it, "사람 (현재 턴)", text)
+                    return f"{wid}: 현재 턴에 전달했습니다."
+            except Exception as e:
+                return f"즉시 전달 실패: {type(e).__name__}: {e}. " + self.message(wid, text)
+        return "즉시 전달 가능한 턴이 없습니다. " + self.message(wid, text)
+
     # ---------------- 스케줄 ----------------
     def schedule(self) -> None:
         if self.closing:

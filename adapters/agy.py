@@ -117,7 +117,9 @@ def install_hook(workdir: Path, python: str | None = None) -> Path:
     created = not path.exists()
     cmd = _hook_command(python or sys.executable, str(HOOK_SCRIPT))
     data[HOOK_NAME] = {"enabled": True, "PreToolUse": [
-        {"matcher": "*", "hooks": [{"type": "command", "command": cmd, "timeout": 3600}]}]}
+        {"matcher": "*", "hooks": [{"type": "command", "command": cmd, "timeout": 3600}]}],
+        **{event: [{"type": "command", "command": cmd + " " + event, "timeout": 30}]
+           for event in ("PreInvocation", "PostInvocation")}}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if created:
         _git_exclude(workdir, ".agents/hooks.json")
@@ -184,12 +186,19 @@ class AgyAdapter(AgentAdapter):
         try:
             line = await reader.readline()
             msg = json.loads(line.decode() or "{}")
-            self._hook_calls += 1
             if msg.get("token") != self._token:
                 answer = {"decision": "deny", "reason": "duet 훅 토큰 불일치"}
             else:
-                call = (msg.get("payload") or {}).get("toolCall") or {}
-                answer = await self._decide(str(call.get("name") or ""), call.get("args") or {})
+                event = msg.get("event", "PreToolUse")
+                if event in ("PreInvocation", "PostInvocation"):
+                    messages = self._take_steering()
+                    answer = {"injectSteps": [{"userMessage": text} for text in messages]} if messages else {}
+                    if messages and event == "PostInvocation":
+                        answer["terminationBehavior"] = "force_continue"
+                else:
+                    self._hook_calls += 1
+                    call = (msg.get("payload") or {}).get("toolCall") or {}
+                    answer = await self._decide(str(call.get("name") or ""), call.get("args") or {})
         except Exception as e:
             answer = {"decision": "deny", "reason": f"duet 훅 처리 오류: {e}"}
         try:
@@ -198,6 +207,11 @@ class AgyAdapter(AgentAdapter):
             writer.close()
         except Exception:
             pass
+
+    async def steer(self, text: str) -> bool:
+        if not self.proc or self.proc.returncode is not None:
+            return False
+        return await self._queue_steering(text)
 
     async def _decide(self, name: str, args: dict) -> dict:
         cmd = str((args or {}).get("CommandLine") or "") if name == "run_command" else ""
@@ -228,6 +242,7 @@ class AgyAdapter(AgentAdapter):
         if not self._system_sent and self.system_append:
             prompt = f"[duet 역할 지침 — 이 대화 내내 따를 것]\n{self.system_append}\n\n---\n\n{prompt}"
         self.busy = True
+        self._steering_closed = False
         result = TurnResult(text="")
         texts: list[str] = []
         partial: dict[int, list[str]] = {}
@@ -311,6 +326,7 @@ class AgyAdapter(AgentAdapter):
                 err_task.cancel()
                 await asyncio.gather(err_task, return_exceptions=True)
             self.busy = False
+            self._finish_steering()
             if self.proc is not None and self.proc.returncode is not None:
                 sweep(self.proc)  # 턴 중에 띄운 백그라운드 자손 정리
                 close_transport(self.proc)
@@ -366,11 +382,13 @@ class AgyAdapter(AgentAdapter):
             self._stderr.append(raw.decode(errors="replace").rstrip())
 
     async def interrupt(self) -> None:
+        self._finish_steering()
         if self.proc and self.proc.returncode is None:
             self._interrupting = True
             interrupt_tree(self.proc.pid)
 
     async def close(self) -> None:
+        self._finish_steering()
         if self.proc and self.proc.returncode is None:
             terminate_tree(self.proc.pid)
         server = getattr(self, "_server", None)

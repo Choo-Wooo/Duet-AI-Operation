@@ -22,7 +22,8 @@ def main() -> int:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
     except Exception:
         payload = {}
-    req = {"token": os.environ.get("DUET_AGY_TOKEN", ""), "payload": payload}
+    event = sys.argv[1] if len(sys.argv) > 1 else "PreToolUse"
+    req = {"token": os.environ.get("DUET_AGY_TOKEN", ""), "payload": payload, "event": event}
     try:
         if bridge.startswith("tcp:"):  # Windows: 127.0.0.1 TCP 포트
             host, _, port = bridge[4:].rpartition(":")

@@ -105,6 +105,8 @@ class Orchestrator:
         self.running = False
         self.loading = False
         self._turn_active = False
+        self._active_turn_n: int | None = None
+        self._steer_lock = asyncio.Lock()
         self._input_pending = False
         self._session_ready = asyncio.Event()
         self._session_ready.set()
@@ -572,6 +574,29 @@ class Orchestrator:
         if self.running:
             self.notice("메시지를 받았습니다. 현재 턴이 끝나면 전달합니다.")
 
+    async def steer(self, text: str, to: str | None = None) -> str:
+        """대상 역할의 현재 턴에 전달하고, 불가능하면 기존 대기열에 보관한다."""
+        text = text.strip()
+        if not text:
+            return ""
+        target = to or self.cfg.main
+        async with self._steer_lock:
+            ad = self.adapters.get(target)
+            reason = "대상의 진행 중인 턴이 없습니다"
+            if target == self.running_role and ad and ad.busy and not self.stop_requested:
+                try:
+                    delivered = await ad.steer(text)
+                    reason = "이 CLI는 즉시 전달을 지원하지 않거나 턴이 끝났습니다"
+                except Exception as e:
+                    delivered = False
+                    reason = f"즉시 전달 실패: {type(e).__name__}: {e}"
+                if delivered:
+                    self._append_human(target, text)
+                    result = f"→ {target}: 현재 턴에 전달했습니다."
+                    return result
+            self.submit(text, to=to)
+            return f"→ {target}: {reason}. 메시지를 다음 턴에 전달합니다."
+
     def _append_human(self, to: str | None, text: str) -> int:
         self._extend_negotiations()
         n = self._next_number()
@@ -860,7 +885,7 @@ class Orchestrator:
         self.notice(f"설계자 심사 세션을 새로 시작합니다 ({reason}).", role=self.cfg.main)
 
     def _next_number(self) -> int:
-        return max(self.cfg.state.last_n, self.dialogue.max_number()) + 1
+        return max(self.cfg.state.last_n, self.dialogue.max_number(), self._active_turn_n or 0) + 1
 
     async def _turn(self, role_name: str, kind: str, info: str) -> tuple[TurnResult, Turn] | None:
         self._turn_active = True
@@ -868,6 +893,7 @@ class Orchestrator:
             return await self._run_turn(role_name, kind, info)
         finally:
             self._turn_active = False
+            self._active_turn_n = None
 
     async def _run_turn(self, role_name: str, kind: str, info: str) -> tuple[TurnResult, Turn] | None:
         self.set_activity(role_name, 'starting', start=True)
@@ -917,6 +943,7 @@ class Orchestrator:
         if kind == "delegate":
             self.current_task[role_name] = info
         self.running_role = role_name
+        self._active_turn_n = n
         self.bus.emit("turn_start", role_name, n=n, kind=kind, info=info)
         self.emit_status()
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import asyncio
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -52,6 +54,8 @@ class AgentAdapter(ABC):
         self.handoff: str | None = None  # 세션 교체 직후 첫 턴에 붙일 안내
         self.context_limit = 0  # 0 이 아니면 CLI 자체 자동 압축 기준으로도 전달 (Codex)
         self.compact_timeout = 300.0  # 압축이 이 시간(초) 안에 끝나지 않으면 실패로 보고 진행을 풀어 준다
+        self._steering: deque[tuple[str, asyncio.Future]] = deque()
+        self._steering_closed = False
 
     def recovery_prompt(self, prompt: str) -> str:
         if self.handoff:
@@ -84,6 +88,38 @@ class AgentAdapter(ABC):
 
     @abstractmethod
     async def run_turn(self, prompt: str) -> TurnResult: ...
+
+    async def steer(self, text: str) -> bool:
+        """진행 중인 턴에 추가 입력을 전달한다. 미지원·턴 종료 시 False."""
+        return False
+
+    async def _queue_steering(self, text: str) -> bool:
+        if not self.busy or self._steering_closed:
+            return False
+        future = asyncio.get_running_loop().create_future()
+        entry = (text, future)
+        self._steering.append(entry)
+        try:
+            return await future
+        finally:
+            if entry in self._steering:
+                self._steering.remove(entry)
+
+    def _take_steering(self) -> list[str]:
+        messages = []
+        while self._steering:
+            text, future = self._steering.popleft()
+            if not future.done():
+                messages.append(text)
+                future.set_result(True)
+        return messages
+
+    def _finish_steering(self) -> None:
+        self._steering_closed = True
+        while self._steering:
+            _, future = self._steering.popleft()
+            if not future.done():
+                future.set_result(False)
 
     async def compact(self, instructions: str = "") -> bool:
         """CLI 고유의 대화 압축을 실행한다. 지원하지 않거나 실패하면 False."""

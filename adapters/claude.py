@@ -90,7 +90,10 @@ class ClaudeAdapter(AgentAdapter):
             can_use_tool=self._can_use_tool,
             resume=resume,
             stderr=self._on_stderr,
-            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=self.approval_timeout + 30)]},
+            hooks={"PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=self.approval_timeout + 30)],
+                   "PostToolUse": [HookMatcher(hooks=[self._steering_context])],
+                   "PostToolUseFailure": [HookMatcher(hooks=[self._steering_context])],
+                   "Stop": [HookMatcher(hooks=[self._steering_stop])]},
         )
         if resume and self.fork_session:
             if "fork_session" in inspect.signature(ClaudeAgentOptions).parameters:
@@ -151,6 +154,32 @@ class ClaudeAdapter(AgentAdapter):
         return PermissionResultDeny(message=decision.reason or "거부됨", interrupt=decision.interrupt)
 
     async def _pre_tool_use(self, data, tool_use_id, context):
+        result = await self._policy_pre_tool_use(data, tool_use_id, context)
+        steering = await self._steering_context({"hook_event_name": "PreToolUse"}, tool_use_id, context)
+        if steering:
+            result.setdefault("hookSpecificOutput", {}).update(steering["hookSpecificOutput"])
+        return result
+
+    async def steer(self, text: str) -> bool:
+        if not self.client:
+            return False
+        return await self._queue_steering(text)
+
+    async def _steering_context(self, data, tool_use_id, context):
+        messages = self._take_steering()
+        if not messages:
+            return {}
+        return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "PostToolUse"),
+                "additionalContext": "사람이 현재 턴에 추가 메시지를 보냈습니다:\n\n" + "\n\n".join(messages)}}
+
+    async def _steering_stop(self, data, tool_use_id, context):
+        messages = self._take_steering()
+        if not messages:
+            return {}
+        return {"decision": "block", "reason": "사람의 추가 메시지를 반영한 뒤 마무리하세요:\n\n"
+                + "\n\n".join(messages)}
+
+    async def _policy_pre_tool_use(self, data, tool_use_id, context):
         name, inp = data.get("tool_name", ""), data.get("tool_input") or {}
         readable = (name in PLAN_TOOLS or tool_matches(name, self.role.auto_tools)
                     or (name == "Bash" and read_only_command(str(inp.get("command", "")))))
@@ -176,6 +205,7 @@ class ClaudeAdapter(AgentAdapter):
     async def run_turn(self, prompt: str) -> TurnResult:
         assert self.client is not None
         self.busy = True
+        self._steering_closed = False
         texts: list[str] = []
         result = TurnResult(text="")
         try:
@@ -231,6 +261,7 @@ class ClaudeAdapter(AgentAdapter):
             result.error = f"{type(e).__name__}: {e}" + (f"\n{tail}" if tail else "")
         finally:
             self.busy = False
+            self._finish_steering()
         result.text = texts[-1] if texts else ""
         result.full_text = "\n\n".join(texts)
         result.context_tokens = self.context_tokens or None
@@ -275,6 +306,7 @@ class ClaudeAdapter(AgentAdapter):
         return ok
 
     async def interrupt(self) -> None:
+        self._finish_steering()
         if self.client and self.busy:
             try:
                 await self.client.interrupt()
@@ -282,6 +314,7 @@ class ClaudeAdapter(AgentAdapter):
                 pass
 
     async def close(self) -> None:
+        self._finish_steering()
         if self.client:
             try:
                 await self.client.disconnect()

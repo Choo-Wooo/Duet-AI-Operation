@@ -71,6 +71,7 @@ class WebUI:
         self.pending: dict[str, dict] = {}  # id -> {kind, payload, future}
         self.asks: dict[str, Any] = {}  # 질문 패널 세션 (역할별)
         self.ask_lock = asyncio.Lock()
+        self._steer_tasks: set[asyncio.Task] = set()
         self.models: dict | None = read_cache(cfg.dir)
         from ..core.config import detect_clis
         self.installed = set(SUPPORTED_CLIS) if fake else set(detect_clis())
@@ -198,6 +199,14 @@ class WebUI:
         if t == "input":
             text = str(msg.get("text") or "")
             to = msg.get("to")
+            if msg.get("immediate") is True and text.strip() and not text.startswith("/"):
+                if to and to not in self.cfg.roles:
+                    if to not in o.work.items:
+                        return {"type": "output", "text": f"대상 '{to}' 가 없습니다."}
+                task = asyncio.create_task(self._steer_input(text, to))
+                self._steer_tasks.add(task)
+                task.add_done_callback(self._steer_tasks.discard)
+                return {"type": "output", "text": "메시지를 현재 턴에 전달하는 중…"}
             if to and not text.startswith("/"):
                 if to in self.cfg.roles:
                     o.submit(text, to=to)
@@ -274,6 +283,17 @@ class WebUI:
             await self._ask_close(str(msg.get("role") or ""))
             return {"type": "output", "text": "질문 세션을 닫았습니다."}
         return {"type": "output", "text": f"알 수 없는 요청: {t}"}
+
+    async def _steer_input(self, text: str, to: str | None) -> None:
+        try:
+            if to and to not in self.cfg.roles:
+                result = await self.orch.work.steer(to, text)
+            else:
+                result = await self.orch.steer(text, to=to)
+            if result:
+                self.orch.notice(result)
+        except Exception as e:
+            self.orch.notice(f"메시지 전달 오류: {type(e).__name__}: {e}", "warn")
 
     async def _refresh_models(self) -> None:
         clis = sorted({r.cli for r in self.cfg.roles.values()} | {c for c in SUPPORTED_CLIS if _has(c)})
@@ -419,6 +439,11 @@ class WebUI:
                     pass
 
     async def close(self) -> None:
+        tasks = list(self._steer_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._ask_close("")
         for p in list(self.pending.values()):
             if not p["future"].done():

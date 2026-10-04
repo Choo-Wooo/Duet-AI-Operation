@@ -335,6 +335,7 @@ class CodexAdapter(AgentAdapter):
                 result.error = "REPORT deviation: plan readOnly 턴을 실행할 수 없습니다. " + result.error
         finally:
             self.busy = False
+            self._turn_id = None
         result.text = self._texts[-1] if self._texts else ""
         result.full_text = "\n\n".join(self._texts)
         result.context_tokens = self.context_tokens or None
@@ -349,6 +350,17 @@ class CodexAdapter(AgentAdapter):
         if result.usage_limited and result.usage_reset_at is None:
             result.usage_reset_at = getattr(self, "_usage_reset_at", None)
         return result
+
+    async def steer(self, text: str) -> bool:
+        turn_id = getattr(self, "_turn_id", None)
+        future = getattr(self, "_turn_fut", None)
+        if not self.busy or not self.session_id or not turn_id or not future or future.done():
+            return False
+        await self.request("turn/steer", {
+            "threadId": self.session_id, "expectedTurnId": turn_id,
+            "input": [{"type": "text", "text": text, "text_elements": []}],
+        }, timeout=15)
+        return True
 
     async def compact(self, instructions: str = "") -> bool:
         """app-server 의 thread/compact/start 로 스레드를 압축한다.
