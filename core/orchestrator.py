@@ -14,6 +14,7 @@ from .config import SUPPORTED_CLIS, Config, Role, validate_role_name
 from .dialogue import Dialogue, Turn, extract_directives
 from .agreement import (changed_files, fingerprint, new_task, parse_plan, read_plan, record_plan,
                         task_status, text_hash)
+from .usage_wait import UsageWait
 from .events import Event, EventBus
 from .gitops import Git
 from .policy import ARCHITECT, AUTO, DENY, HUMAN, ApprovalRequest, Decision, Policy
@@ -141,6 +142,7 @@ class Orchestrator:
             cfg.state.task["waiting"] = True
             cfg.state.task["wait_reason"] = cfg.state.task["wait_reason"] or "재시작 후 메인의 재개 판단 대기"
         self.policy.task = cfg.state.task
+        self.usage = UsageWait(self)
         self.work = WorkBoard(self)
         bus.subscribe(self._on_event)
         for warning in cfg.load_warnings:
@@ -166,6 +168,17 @@ class Orchestrator:
             msg = "전권 자동 수락을 껐습니다. 위험한 요청은 다시 사람에게 묻습니다."
         self.notice(msg, "warn")
         return msg
+
+    def set_usage_retry(self, on: bool) -> str:
+        self.cfg.settings['usage_limit_retry'] = bool(on)
+        self.cfg.save_roles()
+        if not on:
+            self.usage.cancel()
+        self.emit_status()
+        return "사용량 한도 자동 대기·재개: " + ("켜짐" if on else "꺼짐 (대기 취소)")
+
+    async def run_agent_turn(self, ad, prompt):
+        return await self.usage.run(ad, prompt)
 
     # ================= 상태 =================
     def _on_event(self, ev: Event) -> None:
@@ -228,6 +241,8 @@ class Orchestrator:
             "max_turns": None if mt is None else mt + self.extra_turns,
             "mode": self.cfg.state.mode,
             "full_auto": self.full_auto,
+            "usage_limit_retry": self.usage.enabled,
+            "usage_waits": list(self.usage.waits.values()),
             "auto": self.cfg.state.auto,
             "paused": not self.not_paused.is_set(),
             "pending_approvals": self.pending_approvals,
@@ -343,6 +358,7 @@ class Orchestrator:
         return self.reviewer
 
     async def close(self) -> None:
+        self.usage.cancel()
         try:
             await self.work.close()
         except Exception:
@@ -488,7 +504,7 @@ class Orchestrator:
         label = getattr(rev, 'label', self.cfg.main + ' (심사)')
         self.set_activity(label, 'reviewing', start=True)
         try:
-            result = await self._review_turn_wait(rev, prompt, timeout)
+            result = await self.usage.run(rev, prompt, lambda text: self._review_turn_wait(rev, text, timeout))
         except BaseException:
             self.set_activity(label, 'error', '심사 중단 또는 오류')
             raise
@@ -886,7 +902,7 @@ class Orchestrator:
         self.bus.emit("turn_start", role_name, n=n, kind=kind, info=info)
         self.emit_status()
 
-        tr = await ad.run_turn(prompt)
+        tr = await self.run_agent_turn(ad, prompt)
         if not tr.ok and tr.context_overflow and not tr.interrupted and not self.stop_requested:
             # 입력 한도 초과: 같은 세션으로는 다시 해도 실패하므로 새 세션으로 한 번 자동 재시도
             self.notice(f"{role_name} 입력이 모델 한도를 넘었습니다. 새 세션으로 이 턴을 다시 실행합니다.", "warn",
@@ -894,7 +910,7 @@ class Orchestrator:
             try:
                 ad = await self._rotate_session(role_name, "입력 한도 초과 오류")
                 prepare(ad)
-                tr = await ad.run_turn(prompt)
+                tr = await self.run_agent_turn(ad, prompt)
             except Exception as e:
                 tr.error = f"{tr.error} / 새 세션 재시도 실패: {e}"
 
@@ -1477,6 +1493,7 @@ class Orchestrator:
 
     async def stop(self) -> None:
         self.stop_requested = True
+        self.usage.cancel()
         self._wait_task("사람이 /stop으로 중단했습니다")
         self.not_paused.set()
         if self.running_role and self.running_role in self.adapters:

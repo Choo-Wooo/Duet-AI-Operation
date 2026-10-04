@@ -9,7 +9,8 @@
     const elapsed=Math.max(0,Math.floor(now-(a.turn_started_at == null ? now : a.turn_started_at)));
     const resting=['idle','done','error'].includes(a.state);
     let label, color, icon;
-    if(a.state==='awaiting_approval') { label='승인 대기'; color='purple'; icon='◆'; }
+    if(a.state==='usage_wait') { label='사용량 한도 대기'; color='yellow'; icon='◷'; }
+    else if(a.state==='awaiting_approval') { label='승인 대기'; color='purple'; icon='◆'; }
     else if(a.state==='error') { label='턴 중단'; color='red'; icon='✕'; }
     else if(resting) { label='대기'; color='muted'; icon='·'; }
     else if(age>=300) { label='멈춤 의심'; color='red'; icon='!'; }

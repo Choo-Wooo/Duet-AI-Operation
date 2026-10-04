@@ -24,6 +24,8 @@ class TurnResult:
     full_text: str | None = None
     context_tokens: int | None = None  # 이번 턴 마지막 요청의 입력(컨텍스트) 크기
     context_overflow: bool = False  # 모델 입력 한도 초과로 실패했는지
+    usage_limited: bool = False
+    usage_reset_at: float | None = None
 
 
 class AgentAdapter(ABC):

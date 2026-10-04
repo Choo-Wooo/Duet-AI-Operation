@@ -590,7 +590,8 @@ class WorkBoard:
             it.inbox.clear()
         self.orch.bus.emit("turn_start", ad.label, n=0, kind=kind, info=it.id)
         try:
-            tr = await ad.run_turn(prompt)
+            runner = getattr(self.orch, "run_agent_turn", None)
+            tr = await runner(ad, prompt) if runner else await ad.run_turn(prompt)
         except BaseException as e:
             self.orch.bus.emit('turn_end', ad.label, ok=False, error=str(e),
                                interrupted=isinstance(e, asyncio.CancelledError))
