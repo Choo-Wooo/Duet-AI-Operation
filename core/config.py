@@ -12,6 +12,7 @@ import yaml
 
 from .agreement import EXCLUDED_DIRS, EXCLUDED_FILES, validate_task
 from .storage import atomic_write, load_json
+from .verification import DEFAULT_VERIFICATION_LEVEL, VERIFICATION_LEVELS
 
 
 def validate_role_name(name: str) -> None:
@@ -79,7 +80,7 @@ DEFAULT_MODES = {
         "autopilot", None,
         "사람이 모든 권한을 위임했다. 승인·선택을 기다리지 말고 끝까지 진행한다. 판단이 필요한 것은 스스로 정하고 근거를 "
         "docs/ 에 남긴다. 작업자의 질문에는 사람 대신 답한다. ASK_HUMAN 은 요구 자체가 모호해 더 진행할 수 없을 때만 쓴다. "
-        "검증은 평소보다 엄격하게 하고, 막히면 방법을 바꿔 다시 시도한다.", 10, True, "full"),
+        "검증은 설정된 검증 수준을 따르고, 막히면 방법을 바꿔 다시 시도한다.", 10, True, "full"),
 }
 
 DEFAULT_POLICY = {
@@ -166,6 +167,7 @@ class Config:
         self.state = State()
         self.load_warnings: list[str] = []
         self.settings: dict = {"checkpoint_every": 50, "git_snapshots": True,
+                               "verification_level": DEFAULT_VERIFICATION_LEVEL,
                                "plan_rounds": 3, "plan_approval": "architect",
                                "fingerprint_exclude": sorted(EXCLUDED_DIRS | EXCLUDED_FILES),
                                # 세션 컨텍스트가 이 토큰 수를 넘으면 다음 턴 전에 압축(/compact), 실패하면 새 세션
@@ -201,6 +203,8 @@ class Config:
         data = yaml.safe_load(self.roles_file.read_text(encoding="utf-8")) or {}
         self.main = data.get("main", "architect")
         self.settings.update(data.get("settings") or {})
+        if self.settings["verification_level"] not in tuple(VERIFICATION_LEVELS):
+            raise ValueError("settings.verification_level은 functional, balanced, thorough 중 하나입니다")
         if type(self.settings["plan_rounds"]) is not int or self.settings["plan_rounds"] < 1:
             raise ValueError("settings.plan_rounds는 양의 정수여야 합니다")
         if self.settings["plan_approval"] not in ("architect", "human"):

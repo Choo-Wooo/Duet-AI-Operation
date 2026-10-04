@@ -190,7 +190,18 @@ class Orchestrator:
         return "사용량 한도 자동 대기·재개: " + ("켜짐" if on else "꺼짐 (대기 취소)")
 
     async def run_agent_turn(self, ad, prompt):
+        from .verification import verification_guide
+        prompt += "\n" + verification_guide(self.cfg.settings)
         return await self.usage.run(ad, prompt)
+
+    def set_verification_level(self, level: str) -> str:
+        from .verification import VERIFICATION_LEVELS
+        if level not in VERIFICATION_LEVELS:
+            raise ValueError("검증 수준: functional(기능), balanced(균형), thorough(전체)")
+        self.cfg.settings["verification_level"] = level
+        self.cfg.save_roles()
+        self.emit_status()
+        return f"검증 수준: {VERIFICATION_LEVELS[level]} — 다음 턴부터 적용 (기존 합의 명령은 유지)"
 
     # ================= 상태 =================
     def _on_event(self, ev: Event) -> None:

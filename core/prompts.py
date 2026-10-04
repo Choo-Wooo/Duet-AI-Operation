@@ -44,10 +44,10 @@ DELEGATE → plan → plan_review → implement → verify 순서입니다.
 plan 작업자는 DIALOGUE.md를 포함해 파일을 전혀 쓰지 않습니다. 버전 헤더 없이 계획 전문을
 응답하고 마지막에 PLAN ready를 냅니다. 오케스트레이터가 계획 버전과 대화를 기록합니다.
 계획 필수 항목: 이해한 요구, 설계와 다른 점 및 이유(없으면 없음), ```files 라벨 코드블록(한 줄당 파일),
-AC 수용 기준, 테스트↔AC와 모의/실제 구분, test_command: 한 줄, 열린 질문.
+수용 기준과 선택한 검증 수준에 맞는 확인 방법, test_command: 한 줄, 열린 질문.
 메인은 PLAN을 검토해 AGREE vN 또는 REVISE 사유를 내며, 구현자는 합의 버전을 지킵니다.
 벗어나야 하면 코드를 멈추고 새 계획 전문과 REPORT deviation 사유를 응답합니다.
-완료 보고에는 AC별 충족 여부·테스트 매핑·실제 명령과 출력/exit code를 포함합니다.
+완료 보고의 상세도는 현재 검증 수준을 따르며 실제 명령과 결과/exit code를 포함합니다.
 verify에서 메인은 테스트 방법을 검토하고 합의 명령을 직접 실행한 뒤 ACCEPT 또는 REWORK 사유를 냅니다.
 대기 task의 plan/implement는 메인의 RESUME로 재개합니다. AGREE는 재개 지시문이 아닙니다.
 진행 task를 새 DELEGATE로 덮어쓸 수 없습니다. 메인의 CANCEL 사유로 명시적으로 취소합니다.
@@ -150,7 +150,7 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
             lines.append("작업자 진행 상황을 검토해 사람에게 응답하세요. 대기 중이면 RESUME로 같은 단계를 재개하거나 CANCEL 사유로 취소할 수 있습니다.")
         elif task["phase"] == "plan":
             lines.append("계획 전문을 응답하세요. 필수: 요구 요약, 설계와 다른 점/이유, ```files 라벨 코드블록, "
-                         "AC, 테스트↔AC 및 모의/실제 구분, test_command: 한 줄, 열린 질문. "
+                         "수용 기준, 현재 검증 수준에 맞는 확인 방법, test_command: 한 줄, 열린 질문. "
                          "버전 헤더는 쓰지 말고 마지막에 <!-- duet: PLAN ready -->를 쓰세요. 반론도 새 제출입니다.")
         elif task["phase"] == "plan_review":
             lines.append(f"계획 v{task['submitted_version']}를 읽고 요구 해석·설계 차이·AC 범위 및 "
@@ -160,7 +160,7 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
         elif task["phase"] == "implement":
             lines.append(f"{task['plan_path']}의 합의 v{task['agreed_version']}에서 벗어나지 마세요. "
                          "범위 변경이면 멈추고 새 계획 전문+REPORT deviation을 응답하세요. 계획 파일은 직접 고치지 마세요.")
-            lines.append("완료 시 AC별 충족 표, 테스트↔AC 매핑, 실행 명령/출력/exit code와 REPORT done을 기록하세요.")
+            lines.append("완료 시 현재 검증 수준에 맞게 충족한 요구, 실행 명령/결과/exit code와 REPORT done을 기록하세요.")
         elif task["phase"] == "verify":
             lines.append("검토 체크리스트: ① AC 전부 충족 ② 계획 외 변경 정당성 ③ 테스트가 AC를 검증하는가: "
                          "모의가 핵심 로직을 대체하지 않는가, 결함이 있을 때 실패하는가 ④ 직접 실행 결과.")

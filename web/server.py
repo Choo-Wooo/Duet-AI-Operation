@@ -32,6 +32,8 @@ REPLAY = 3000
 
 # 웹에서 바꿀 수 있는 설정: 키 → (형 변환, 검사, 설명)
 SETTINGS: dict[str, tuple[Any, Any, str]] = {
+    "verification_level": (str, lambda v: v in ("functional", "balanced", "thorough"),
+                           "핵심 기능(기본): 정상 동작만 테스트, 예외·위험은 미검증 보고만 · 균형: 관련 회귀·경계까지 · 전체: 모든 기준·전체 테스트. 다음 턴부터 적용하며 기존 합의 명령은 유지합니다."),
     "usage_limit_retry": (bool, None, "사용량 한도 자동 대기·재개 (기본 꺼짐, 앱 실행 중에만 동작)"),
     "usage_limit_wait_sec": (int, lambda v: 60 <= v <= 604800, "재설정 시각이 없을 때 대기 시간(초), 기본 18000 = 5시간"),
     "usage_limit_max_retries": (int, lambda v: 1 <= v <= 100, "한 턴의 사용량 한도 재시도 횟수 (기본 3)"),
@@ -364,6 +366,8 @@ class WebUI:
             return {"type": "output", "text": f"{key}: 허용 범위를 벗어났습니다"}
         if key == "usage_limit_retry":
             return {"type": "output", "text": self.orch.set_usage_retry(bool(value)), "state": self.state()}
+        if key == "verification_level":
+            return {"type": "output", "text": self.orch.set_verification_level(value), "state": self.state()}
         if key == "design_questions":
             return {"type": "output", "text": self.orch.set_design_questions(bool(value)), "state": self.state()}
         if key == "full_auto":

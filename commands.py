@@ -8,6 +8,7 @@ from .core.orchestrator import Orchestrator
 from .core.saves import format_saves
 
 HELP = """명령어
+  /verification [functional|balanced|thorough]  검증 수준 보기/변경 (기능/균형/전체)
   (일반 텍스트)              메인 역할(설계자)에게 전달
   /to <역할> <메시지>        특정 역할에게 직접 전달
   /mode [이름]               대화 모드 보기/변경 (sprint, review, deliberate, autopilot=전권 자동)
@@ -70,6 +71,15 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
         return "세션을 불러오는 중입니다. 완료 후 다시 시도하세요."
     if cmd in ("help", "h", "?"):
         return HELP
+    if cmd == "verification":
+        from .core.verification import DEFAULT_VERIFICATION_LEVEL, VERIFICATION_LEVELS
+        if not rest:
+            level = orch.cfg.settings.get("verification_level", DEFAULT_VERIFICATION_LEVEL)
+            return f"검증 수준: {VERIFICATION_LEVELS[level]} ({level}) — functional / balanced / thorough"
+        try:
+            return orch.set_verification_level(rest)
+        except ValueError as e:
+            return str(e)
     if cmd in ("save", "saves", "load", "save-delete"):
         try:
             if cmd == "saves":

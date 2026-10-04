@@ -756,9 +756,10 @@ function renderSettings() {
     send({type: "setting", key: "full_auto", value: e.target.checked});
   };
   box.innerHTML = Object.entries(S.settings).filter(([k]) => k !== "full_auto").map(([k, v]) => {
-    const input = typeof v === "boolean" ? `<input type="checkbox" data-k="${k}" ${v ? "checked" : ""}>` :
+    const input = k === "verification_level" ? `<select data-k="${k}">${[["functional", "핵심 기능 검증 (기본)"], ["balanced", "균형 검증"], ["thorough", "전체 검증 (꼼꼼하게)"]].map(([value, label]) => `<option value="${value}" ${v === value ? "selected" : ""}>${label}</option>`).join("")}</select>` :
+      typeof v === "boolean" ? `<input type="checkbox" data-k="${k}" ${v ? "checked" : ""}>` :
       typeof v === "number" ? `<input type="number" data-k="${k}" value="${v}">` : `<input type="text" data-k="${k}" value="${esc(v ?? "")}" style="width:100%">`;
-    return `<label class="mono">${k === "design_questions" ? "설계 질문 모드" : k === "usage_limit_retry" ? "사용량 한도 자동 대기·재개" : k}</label><div>${input}<div class="help">${esc(S.settings_help[k] || "")}</div></div>`;
+    return `<label class="mono">${k === "verification_level" ? "검증 수준" : k === "design_questions" ? "설계 질문 모드" : k === "usage_limit_retry" ? "사용량 한도 자동 대기·재개" : k}</label><div>${input}<div class="help">${esc(S.settings_help[k] || "")}</div></div>`;
   }).join("");
   box.querySelectorAll("[data-k]").forEach(el => el.onchange = () => send({type: "setting", key: el.dataset.k, value: el.type === "checkbox" ? el.checked : el.value}));
 }
