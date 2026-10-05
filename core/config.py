@@ -145,6 +145,7 @@ class State:
     fork_on_resume: list[str] = field(default_factory=list)
     reviewer_fork_on_resume: list[str] = field(default_factory=list)
     task: dict | None = None
+    completed_delegations: list[dict] = field(default_factory=list)
     design_questions: dict = field(default_factory=dict)
 
 

@@ -396,7 +396,7 @@ function drawActivity() {
     if(c.textContent!==p.text)c.textContent=p.text;
     if(c.title!==p.title)c.title=p.title;
   }
-  renderBoard(S.status.work||[]);
+  renderBoard(S.status.board_work || S.status.work || []);
 }
 setInterval(drawActivity,1000);
 const colors = ["#7aa2f7", "#9ece6a", "#e0af68", "#bb9af7", "#7dcfff", "#f7768e", "#73daca", "#ff9e64"];
@@ -477,7 +477,7 @@ function renderStatus(s) {
     return `<div class="ctxrow"><span>${esc(n)} ${Math.round(used / 1000)}k${lim ? "/" + Math.round(lim / 1000) + "k" : ""}</span><div class="bar"><i class="${pct > 80 ? "hot" : ""}" style="width:${pct}%"></i></div></div>`;
   }).join("");
   $("#ctx").innerHTML = ctx ? "<div style='margin-bottom:4px'>컨텍스트</div>" + ctx : "";
-  renderBoard(s.work || []);
+  renderBoard(s.board_work || s.work || []);
   renderTargets();
   drawActivity();
 }
@@ -585,7 +585,7 @@ function boardSkeleton() {
   const board = $("#board");
   if (board.dataset.ready) return;
   board.dataset.ready = "1";
-  board.append(boardLanes.empty = mk("div", "help", `병렬 작업이 없습니다. 설계자가 duet-work 블록으로 작업을 나누면 여기에 나타납니다. 역할별 병렬 최대치는 "역할·모델"에서 정합니다.`));
+  board.append(boardLanes.empty = mk("div", "help", `등록된 작업이 없습니다. 순차 위임과 병렬 작업이 모두 여기에 나타납니다.`));
   boardLanes.empty.style.gridColumn = "1/-1";
   for (const name of ["대기", "진행", "완료", "중단"]) {
     const lane = mk("div", "lane"), h = mk("h3"), cards = mk("div", "cards");
@@ -610,16 +610,29 @@ function boardCard(id) {
 }
 function updateCard(c, w) {
   c.thread = w.thread;
-  setText(c.id, w.id); setText(c.role, w.role); c.role.style.color = colorOf(w.role);
-  setText(c.status, w.status); const cls = "pill " + w.status.split(":")[0]; if (c.status.className !== cls) c.status.className = cls;
+  const single = w.kind === "delegation";
+  const ended = ["accepted", "cancelled", "failed"].includes(w.status);
+  setText(c.id, w.id); setText(c.role, `${w.role} · ${single ? "순차 위임" : "병렬"}`); c.role.style.color = colorOf(w.role);
+  const phases = {plan: "계획", plan_review: "계획 검토", implement: "구현", verify: "검증", accepted: "완료", cancelled: "취소"};
+  const phase = w.status.replace(/^waiting:/, "");
+  setText(c.status, single ? (w.status.startsWith("waiting:") ? "대기 · " : "") + (phases[phase] || phase) : w.status); const cls = "pill " + w.status.split(":")[0]; if (c.status.className !== cls) c.status.className = cls;
   const now = activityNow(performance.now()/1000);
   const ss = (S.status.work_sessions || []).filter(x => x.id === w.id).map(x => { const d = DuetActivity.describe(x, now); return {t: `${x.role} · ${d.text}`, title: d.title}; });
+  if (single && !ended) {
+    const a = (S.status.activity || {})[w.active_role];
+    if (a) { const d = DuetActivity.describe(a, now); ss.push({t: `${w.active_role} · ${d.text}`, title: d.title}); }
+  }
   setText(c.sessions, ss.length ? ss.map(x => x.t).join(" / ") : "세션 —"); c.sessions.title = ss.map(x => x.title).join("\n");
   setText(c.task, short(w.task, 220)); c.task.title = w.task || "";
+  c.deps.hidden = single;
   setText(c.deps, "의존: " + ((w.depends_on || []).join(", ") || "—"));
   setText(c.files, "파일: " + ((w.agreed_files || []).join(" · ") || "—"));
   setText(c.wait, "대기 사유: " + (w.wait_reason ? short(w.wait_reason, 300) : "—")); c.wait.title = w.wait_reason || "";
-  setText(c.merged, "병합: " + (w.merged_commit ? w.merged_commit.slice(0, 9) : "—"));
+  setText(c.merged, single ? (ended ? "순차 위임 종료" : "재개·취소 요청은 진행 탭에서 메인 담당자에게 보내세요.") : "병합: " + (w.merged_commit ? w.merged_commit.slice(0, 9) : "—"));
+  setText(c.open, single ? "계획 문서" : "기록");
+  c.open.disabled = !w.thread;
+  c.resume.hidden = single;
+  c.cancel.hidden = single;
   c.resume.disabled = !w.status.startsWith("waiting");
   c.cancel.disabled = ["merged", "failed", "cancelled"].includes(w.status);
 }
@@ -634,7 +647,7 @@ function renderBoard(items) {
   const lanes = {"대기": [], "진행": [], "완료": [], "중단": []};
   items.forEach(w => {
     const s = w.status;
-    if (s === "merged") lanes["완료"].push(w);
+    if (s === "merged" || s === "accepted") lanes["완료"].push(w);
     else if (s === "failed" || s === "cancelled") lanes["중단"].push(w);
     else if (s === "queued" || s.startsWith("waiting")) lanes["대기"].push(w);
     else lanes["진행"].push(w);

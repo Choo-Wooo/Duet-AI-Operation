@@ -249,6 +249,26 @@ class Orchestrator:
         if emit:
             self.emit_status(terminal=state in ('done', 'error', 'idle'))
 
+    def delegation_card(self, task: dict, outcome: str | None = None) -> dict:
+        phase = task["phase"]
+        return dict(id=task["id"], kind="delegation", role=task["role"],
+                    task=task["instruction"], phase=phase,
+                    status=outcome or (("waiting:" if task["waiting"] else "") + phase),
+                    wait_reason=task.get("wait_reason", ""),
+                    agreed_files=list(task.get("agreed_files", [])),
+                    thread=task["plan_path"] if task.get("submitted_version") else None,
+                    active_role=self.cfg.main if phase in ("plan_review", "verify") else task["role"])
+
+    def board_snapshot(self) -> list[dict]:
+        # Presentation only: sequential work must never enter the parallel scheduler.
+        cards = self.work.snapshot() if hasattr(self, "work") else []
+        active = self.cfg.state.task
+        cards += [dict(c) for c in self.cfg.state.completed_delegations
+                  if not active or c["id"] != active["id"]]
+        if active:
+            cards.append(self.delegation_card(active))
+        return cards
+
     def status(self) -> dict[str, Any]:
         mt = self.cfg.max_turns
         for name in self.cfg.roles:
@@ -281,6 +301,7 @@ class Orchestrator:
             "task": ({k: self.cfg.state.task[k] for k in ("id", "phase", "plan_path", "submitted_version",
                        "agreed_version", "rounds", "waiting")} if self.cfg.state.task else None),
             "task_summary": task_status(self.cfg.state.task),
+            "board_work": self.board_snapshot(),
             "work": self.work.snapshot() if hasattr(self, "work") else [],
             "work_base": getattr(getattr(self, "work", None), "base", None),
         }
@@ -1159,6 +1180,7 @@ class Orchestrator:
     def _finish_task(self, reason: str) -> None:
         task = self.cfg.state.task
         if task:
+            self.cfg.state.completed_delegations.append(self.delegation_card(task, reason))
             self.mark_compaction_due(reason=f"작업 {task['id']} 종료")
             self.cfg.state.task = None
             self.policy.task = None
