@@ -55,7 +55,8 @@ class DesignQuestions:
     def initial_answer(self, text):
         from .dialogue import extract_directives
         questions = [v for k, v in extract_directives(text) if k == "ASK_HUMAN"]
-        text = re.sub(r"<!--\s*duet:.*?-->", "", text, flags=re.S).strip() or "\n".join(questions)
+        text = re.sub(r"<!--\s*duet:.*?-->", "", text, flags=re.S).strip()
+        text = "\n\n".join(part for part in (text, *(q for q in questions if q and q not in text)) if part)
         self.state.update(phase="awaiting_initial", initial=text or "계획을 검토하고 진행 여부를 알려주세요.")
         self.save()
         self.orch.bus.emit("ask", self.orch.cfg.main, text=self.state["initial"])

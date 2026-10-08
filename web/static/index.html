@@ -792,7 +792,7 @@ function renderJevStatus(v) {
   $("#jevKeyClear").disabled = !["saved", "unavailable"].includes(credential.source);
   $("#jevUsage").textContent = `이번 실행: ${(v.calls || 0).toLocaleString()}회 판단 · 입력 ${(v.input_tokens || 0).toLocaleString()} / 출력 ${(v.output_tokens || 0).toLocaleString()} 토큰 · 예상 $${Number(v.estimated_cost_usd || 0).toFixed(6)} · 오류 복귀 ${(v.fallbacks || 0).toLocaleString()}회`;
   const last = v.last;
-  const purposes = {choice: "자동 선택", approval: "승인 판단", approval_confirm: "승인 재확인", flow: "정체 판단", handoff: "인계 판단", idle: "응답 대기 판단"};
+  const purposes = {choice: "자동 선택", approval: "승인 판단", approval_confirm: "승인 재확인", flow: "정체 판단", handoff: "인계 판단", idle: "응답 대기 판단", turn_route: "질문·턴 전달"};
   $("#jevLast").textContent = last ? `최근: ${purposes[last.purpose] || last.purpose} · ${last.mode === "shadow" ? "관찰" : "적용"} · ${last.error ? "오류: " + last.error : "판단 완료"}` : "아직 JEV 관제 판단이 없습니다. 연결 확인 사용량은 위 집계에 포함하지 않습니다.";
 }
 const conventionEditor = {loaded: false, loading: false, dirty: false, saving: null, version: "", revision: 0, readRid: null};
@@ -881,7 +881,7 @@ function renderSettings() {
     if (e.target.checked && !confirm("전권 자동 수락을 켤까요?\n일반 승인·선택을 자동 처리합니다. 설계 질문 모드를 켜면 중요 설계 질문은 직접 답변을 받습니다. git push·sudo·시스템 삭제·배포만 막습니다.")) { e.target.checked = false; return; }
     send({type: "setting", key: "full_auto", value: e.target.checked});
   };
-  const jevLabels = {jev_mode: "JEV 사용 모드", jev_model: "모델", jev_timeout_sec: "대기 한도 (초)", jev_confidence_threshold: "판단 확신 기준", jev_choices: "자동 선택", jev_approvals: "승인 판단", jev_flow: "정체·응답 대기·인계 판단"};
+  const jevLabels = {jev_mode: "JEV 사용 모드", jev_model: "모델", jev_timeout_sec: "대기 한도 (초)", jev_confidence_threshold: "판단 확신 기준", jev_choices: "자동 선택", jev_approvals: "승인 판단", jev_flow: "질문·턴 전달·정체 판단"};
   $("#jevSettings").innerHTML = Object.entries(S.settings).filter(([k]) => k.startsWith("jev_")).map(([k, v]) => {
     const input = k === "jev_mode" ? `<select data-k="${k}">${[["off", "끔"], ["shadow", "관찰 (판단 기록만)"], ["on", "적용"]].map(([value, label]) => `<option value="${value}" ${v === value ? "selected" : ""}>${label}</option>`).join("")}</select>` :
       typeof v === "boolean" ? `<input type="checkbox" data-k="${k}" ${v ? "checked" : ""}>` :

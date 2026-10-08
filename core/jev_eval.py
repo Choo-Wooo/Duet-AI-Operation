@@ -65,10 +65,13 @@ async def evaluate_cases(cases, source: Config, *, client_factory=JevClient):
             control = JevControl(orch)
             # Credentials never enter synthetic state or project files.
             control.client_factory = lambda ignored, **kwargs: client_factory(key, **kwargs)
-            cfg.state.task = {"id": case["id"], "instruction": case["instruction"], "phase": "implement",
+            role = case.get("role", "implementer")
+            cfg.settings["design_questions"] = bool(case.get("design_questions", False))
+            cfg.state.task = {"id": case["id"], "instruction": case["instruction"],
+                              "phase": case.get("phase", "implement"),
                               "waiting": False, "agreed_files": case.get("agreed_files", []), "test_command": ""}
             for report in case.get("reports", []):
-                control.record_turn("implementer", "implement", report)
+                control.record_turn(role, case.get("turn_kind", "implement"), report)
             decisions = []
             orch.bus = EventBus()
             orch.bus.subscribe(lambda ev: decisions.append(dict(ev.data)) if ev.kind == "jev_decision" else None)
@@ -84,6 +87,13 @@ async def evaluate_cases(cases, source: Config, *, client_factory=JevClient):
                 policy.task = cfg.state.task
                 result = await control.approval(request, policy, "Synthetic approval review")
                 actual = "refer" if result is None else "allow" if result.allow else "deny"
+            elif case["kind"] == "route":
+                result = await control.route_turn(
+                    role, case["report"], cfg.state.task, kind=case.get("turn_kind", "implement"),
+                    directives=[tuple(d) for d in case.get("directives", [])],
+                    issue=case.get("issue", ""), allowed=tuple(case["allowed"]))
+                # Abstention is visible as a miss, not silently relabeled as the expected action.
+                actual = result or "refer"
             else:
                 raise ValueError("unknown case kind")
             error = next((d["error"] for d in decisions if d.get("error")), None)

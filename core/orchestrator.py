@@ -157,6 +157,8 @@ class Orchestrator:
         self.design = DesignQuestions(self)
         self.work = WorkBoard(self)
         self.jev = JevControl(self)
+        from .turn_routing import TurnRouter
+        self.turn_router = TurnRouter(self)
         bus.subscribe(self._on_event)
         for warning in cfg.load_warnings:
             self.notice(warning, 'warn')
@@ -763,6 +765,7 @@ class Orchestrator:
         self.hashes = [self.git.code_hash()]
         self.task_history = []
         self.jev.reset()
+        self.turn_router.reset()
         final = False
         while nxt:
             await self.not_paused.wait()
@@ -1034,7 +1037,7 @@ class Orchestrator:
         def prepare(a: AgentAdapter) -> None:
             a.turn_kind = kind
             a.agreement_phase = task["phase"] if task else None
-            a.plan_read_only = kind == "design_questions" or bool(task and role_name != self.cfg.main
+            a.plan_read_only = kind in ("design_questions", "jev_consult") or bool(task and role_name != self.cfg.main
                                     and (task["phase"] in ("plan", "plan_review") or task["waiting"]))
             a.verification_command = (task["test_command"] if task and task["phase"] == "verify"
                                       and role_name == self.cfg.main else None)
@@ -1150,6 +1153,9 @@ class Orchestrator:
         if not tr.ok or tr.interrupted or self.stop_requested:
             self._wait_task(tr.error or "턴 중단")
             return None
+        routed, next_turn = await self.turn_router.route(role, kind, tr, turn)
+        if routed:
+            return next_turn
         convention_report = tr.full_text or tr.text or turn.body
         # Agents may write the review directly to DIALOGUE and only acknowledge
         # that write in their response. Validate the same turn as its directives.
@@ -1254,8 +1260,9 @@ class Orchestrator:
             return (target, "delegate", task)
         if kind == "human":  # 사람이 /to 로 직접 말을 건 경우 → 답하면 사람에게
             return None
-        handoff = await self.jev.handoff(role, tr.full_text or tr.text or turn.body,
-                                         {"instruction": self.current_task.get(role, ""), "phase": "implement"})
+        handoff = None if getattr(turn, 'jev_routed', False) else await self.jev.handoff(
+            role, tr.full_text or tr.text or turn.body,
+            {"instruction": self.current_task.get(role, ""), "phase": "implement"})
         if self.stop_requested or not self.inbox.empty():
             return None
         if handoff == "continue":
@@ -1447,7 +1454,7 @@ class Orchestrator:
         if phase == "implement" and role == worker and action == "REPORT":
             report = arg.split(maxsplit=1)[0:1]
             if report == ["done"]:
-                handoff = await self.jev.handoff(role, turn.body, task)
+                handoff = None if getattr(turn, 'jev_routed', False) else await self.jev.handoff(role, turn.body, task)
                 if self.stop_requested or not self.inbox.empty() or self.cfg.state.task is not task or task["waiting"]:
                     return None
                 if handoff == "continue":

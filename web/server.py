@@ -41,7 +41,7 @@ SETTINGS: dict[str, tuple[Any, Any, str]] = {
     "jev_confidence_threshold": (float, lambda v: 0 <= v <= 1, "모든 JEV 판단에 적용할 최소 확신값 (0~1, 기본 0.8). 미달하면 기존 절차로 복귀"),
     "jev_choices": (bool, None, "자동 모드의 선택지를 작업 맥락에 따라 판단"),
     "jev_approvals": (bool, None, "승인 정책으로 결정하지 못한 요청을 판단. 명시적 보호·금지 정책은 유지"),
-    "jev_flow": (bool, None, "턴 종료 시 정체·반복 진행 신호와 다음 역할로의 인계를 판단"),
+    "jev_flow": (bool, None, "질문 형식·다음 턴 전달·정체·응답 대기·완료 보고 인계를 판단. 잘못된 질문은 작성한 모델에 재작성 요청"),
     "verification_level": (str, lambda v: v in ("functional", "balanced", "thorough"),
                            "핵심 기능(기본): 정상 동작만 테스트, 예외·위험은 미검증 보고만 · 균형: 관련 회귀·경계까지 · 전체: 모든 기준·전체 테스트. 다음 턴부터 적용하며 기존 합의 명령은 유지합니다."),
     "usage_limit_retry": (bool, None, "사용량 한도 자동 대기·재개 (기본 꺼짐, 앱 실행 중에만 동작)"),

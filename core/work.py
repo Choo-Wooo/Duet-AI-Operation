@@ -41,6 +41,7 @@ DONE = ("merged", "failed", "cancelled")
 REPORT_TRIGGER = "\x00duet-work-report"
 MAX_CONSULTS = 6
 MAX_REWORK = 4
+MAX_ROUTE_REPAIRS = 2
 
 WORK_SYSTEM = BACKGROUND_WAIT + """
 # duet 병렬 작업 규칙
@@ -620,7 +621,116 @@ class WorkBoard:
                 if self.orch.activity.get(ad.label, {}).get('state') not in ('done', 'error', 'idle'):
                     self.orch.set_activity(ad.label, 'idle')
 
+    def _route_guard(self, it: WorkItem) -> None:
+        if (self.closing or getattr(self.orch, "stop_requested", False)
+                or it.status in DONE or it.status.startswith("waiting:")):
+            raise asyncio.CancelledError
+        budget = getattr(self.orch, "budget_usd", None)
+        hours = getattr(self.orch, "max_hours", None)
+        if ((budget is not None and getattr(self.orch, "cost_usd", 0) >= budget)
+                or (hours is not None and (time.time() - getattr(self.orch, "started", time.time())) / 3600 >= hours)):
+            raise _Wait(it.status if it.status in ACTIVE else "implement", "실행 예산·시간 한도")
+
     async def _turn(self, ad, it: WorkItem, kind: str, prompt: str, who: str):
+        """Let JEV route a completed response; only its author can repair controls."""
+        phase = {"work_plan": "plan", "work_review": "plan_review", "work_implement": "implement",
+                 "work_verify": "verify", "work_consult": it.status}.get(kind, it.status)
+        worker = kind in ("work_plan", "work_implement")
+        allowed = ("follow", "repair", "human")
+        if worker:
+            allowed += ("architect", "continue")
+        if kind == "work_implement":
+            allowed += ("review",)
+        expected = {"work_plan": "PLAN ready", "work_review": "AGREE 또는 REVISE <수정 요청>",
+                    "work_implement": "REPORT done 또는 REPORT blocked <이유>",
+                    "work_verify": "ACCEPT 또는 REWORK <사유>",
+                    "work_consult": "질문에 대한 구체적인 답변"}.get(kind, "현재 단계의 지시문")
+        original_prompt, repairs = prompt, 0
+        unresolved = ""
+        while True:
+            self._route_guard(it)
+            tr, full, dirs = await self._turn_once(ad, it, kind, prompt, who)
+            jev = getattr(self.orch, "jev", None)
+            route = getattr(jev, "route_turn", None)
+            if not callable(route):
+                return tr, full, dirs
+            design = getattr(self.orch, "design", None)
+            if design and design.blocked(it.role + "#" + it.id):
+                self._check_ask(dirs, phase)
+                raise _Wait(phase, "중요 설계 질문에 대한 실제 사용자 답변 대기")
+            issue = ""
+            asks = [v for k, v in dirs if k == "ASK_HUMAN"]
+            controls = [(k, v) for k, v in dirs if k in
+                        ("PLAN", "AGREE", "REVISE", "REPORT", "ACCEPT", "REWORK", "ASK_HUMAN", "CONSULT")]
+            if len(controls) > 1 and not all(k == "ASK_HUMAN" for k, _ in controls):
+                issue = "서로 다른 제어 지시문이 함께 있습니다. 질문 또는 현재 단계의 지시문 하나만 제출하세요."
+            elif not asks and not any(k == "CONSULT" for k, _ in dirs):
+                required = {"work_plan": ("PLAN",), "work_review": ("AGREE", "REVISE"),
+                            "work_verify": ("ACCEPT", "REWORK")}.get(kind, ())
+                if required and not any(k in required for k, _ in dirs):
+                    issue = f"현재 단계에 필요한 지시문이 없습니다: {expected}."
+                elif kind == "work_plan" and any(k == "PLAN" and v != "ready" for k, v in dirs):
+                    issue = "계획 제출 지시문은 PLAN ready여야 합니다."
+                elif any(k in ("REVISE", "REWORK") and not v.strip() for k, v in dirs):
+                    issue = "수정·재작업 요청에 구체적인 사유가 없습니다."
+                elif kind == "work_plan" and ("PLAN", "ready") in dirs:
+                    try:
+                        parse_plan(full)
+                    except ValueError as e:
+                        issue = f"계획 제출 형식 오류: {e}"
+            prior_input = tuple(it.inbox)
+            turn_allowed = allowed
+            if any(k in ("ASK_HUMAN", "CONSULT") or
+                   (k == "REPORT" and v.split(maxsplit=1)[0:1] in (["blocked"], ["deviation"]))
+                   for k, v in dirs):
+                turn_allowed = tuple(a for a in allowed if a not in ("continue", "review"))
+            action = await route(ad.label, full, {
+                "id": it.id, "instruction": it.task, "phase": phase,
+                "agreed_files": it.agreed_files, "test_command": it.test_command,
+            }, kind=kind, directives=dirs, issue=issue, allowed=turn_allowed)
+            self._route_guard(it)
+            if not self.orch.not_paused.is_set():
+                raise _Wait(phase, "JEV 판단 중 작업이 일시정지되었습니다.")
+            if not self.orch.inbox.empty() or tuple(it.inbox) != prior_input:
+                raise _Wait(phase, "새 사용자·설계자 입력이 도착했습니다. 입력을 반영한 뒤 재개하세요.")
+            if action is None or action not in turn_allowed:
+                if repairs:
+                    tr.__dict__["jev_route"] = "repair"
+                return tr, full, dirs
+            tr.__dict__["jev_route"] = action
+            if action == "follow":
+                return tr, full, dirs
+            question = "\n".join(v if k == "ASK_HUMAN" else v.partition(" ")[2]
+                                 for k, v in dirs if k in ("ASK_HUMAN", "CONSULT")) or full
+            if action == "human":
+                return tr, full, [("ASK_HUMAN", "\n".join(asks) or full)]
+            if action == "architect" and worker:
+                # A technical question can be discussed, but no answer is invented.
+                return tr, full, [("CONSULT", "architect " + question)]
+            if action == "review":
+                blocked = any(k in ("ASK_HUMAN", "CONSULT") or
+                              (k == "REPORT" and v.split(maxsplit=1)[0:1] in (["blocked"], ["deviation"]))
+                              for k, v in dirs)
+                if not blocked:
+                    return tr, full, [("REPORT", "done")]
+                return tr, full, dirs
+            if action in ("repair", "continue"):
+                unresolved = unresolved or question
+                if repairs >= MAX_ROUTE_REPAIRS:
+                    raise _Wait(phase, "JEV 질문·응답 보완 한도 — 원문: " + unresolved)
+                repairs += 1
+                note = ("JEV 관제: 질문 또는 응답의 형식을 보완하세요. 질문은 누구에게 어떤 결정을 요청하는지, "
+                        "선택지·추천안·영향을 구체적으로 쓰세요. 이미 답변된 내용을 다시 묻지 마세요. "
+                        "사람의 답을 대신 결정하거나 완료를 꾸미지 마세요. "
+                        if action == "repair" else
+                        "JEV 관제: 현재 단계에 남은 작업을 계속하고 실제 결과를 보고하세요. ")
+                ending = ("질문에 대한 구체적인 답변을 본문에 쓰세요. " if kind == "work_consult" else
+                          f"응답 끝에 {expected}를 <!-- duet: ... --> 형식으로 쓰세요. ")
+                prompt = (note + ending +
+                          "정말 사람 판단이 필요하면 ASK_HUMAN <질문>을 쓰세요.\n\n" + original_prompt)
+                self._thread(it, "duet · JEV", note + f"({repairs}/{MAX_ROUTE_REPAIRS})")
+
+    async def _turn_once(self, ad, it: WorkItem, kind: str, prompt: str, who: str):
         snapshot = self._conventions(it)
         await self.orch.not_paused.wait()
         ad.turn_kind = kind
@@ -646,6 +756,8 @@ class WorkBoard:
         if jev := getattr(self.orch, "jev", None):
             jev.record_turn(ad.label, kind, full or tr.error or "", ok=tr.ok and not tr.interrupted)
         self._thread(it, f"{who} · {kind}", full or f"(오류) {tr.error}")
+        if tr.interrupted:
+            raise asyncio.CancelledError
         if not tr.ok:
             raise RuntimeError(tr.error or "턴 실패")
         return tr, full or "", extract_directives(full or "")
@@ -806,7 +918,7 @@ class WorkBoard:
                       f"다른 작업:\n{self._others(it)}\n"
                       "끝나면 AC별 충족 여부, 바꾼 파일, 테스트 명령과 결과를 보고하고 <!-- duet: REPORT done --> "
                       "(막히면 REPORT blocked <이유>). git 커밋은 하지 마세요.")
-            _, full, dirs = await self._consultable(worker, it, "work_implement", prompt, path)
+            tr, full, dirs = await self._consultable(worker, it, "work_implement", prompt, path)
             self._check_ask(dirs, "implement")
             report = next((v for k, v in dirs if k == "REPORT"), "")
             if report.startswith("blocked"):
@@ -818,7 +930,7 @@ class WorkBoard:
                     raise _Wait("implement", "보고 형식 오류 반복")
                 continue
             jev = getattr(self.orch, "jev", None)
-            if jev and jev_handoffs < 2:
+            if jev and jev_handoffs < 2 and not getattr(tr, "jev_route", None):
                 action = await jev.handoff(worker.label, full, {
                     "id": it.id, "instruction": it.task, "phase": "implement",
                     "agreed_files": it.agreed_files, "test_command": it.test_command,
@@ -1002,16 +1114,32 @@ class WorkBoard:
         """작업자 턴 실행. CONSULT 가 있으면 답을 받아 같은 단계 턴을 이어간다."""
         who = it.role
         tr, full, dirs = await self._turn(ad, it, kind, prompt, who)
+        malformed = 0
         while True:
+            self._route_guard(it)
+            self._check_ask(dirs, it.status if it.status in ACTIVE else "implement")
             consult = next((v for k, v in dirs if k == "CONSULT"), None)
             if consult is None:
                 return tr, full, dirs
+            target, _, question = consult.partition(" ")
+            target, question = target.strip(), question.strip()
+            other = self.items.get(target)
+            if (not question or target == it.id or
+                    (target not in ("architect", self.cfg.main)
+                     and (not other or other.status in DONE and other.status != "merged"))):
+                if malformed >= MAX_ROUTE_REPAIRS:
+                    raise _Wait(it.status, "협의 질문 형식 보완 한도 — 원문: " + consult)
+                malformed += 1
+                tr, full, dirs = await self._turn(ad, it, kind,
+                    "[duet] CONSULT 대상 또는 질문이 올바르지 않습니다. 대상은 architect 또는 실제 다른 작업 ID, "
+                    "질문은 구체적인 문장이어야 합니다. <!-- duet: CONSULT architect <질문> --> 형식으로 보완하세요. "
+                    "사람 판단이 필요하면 ASK_HUMAN <질문>을 쓰세요.\n\n" + prompt, who)
+                continue
+            if it.consults >= MAX_CONSULTS:
+                raise _Wait(it.status, f"협의 한도({MAX_CONSULTS}회) — 마지막 질문: {question}")
             it.consults += 1
-            if it.consults > MAX_CONSULTS:
-                answer = f"협의 한도({MAX_CONSULTS}회)를 넘었습니다. 지금까지의 정보로 진행하거나 REPORT blocked 하세요."
-            else:
-                target, _, question = consult.partition(" ")
-                answer = await self._answer(it, target.strip(), question.strip(), path)
+            self.save()
+            answer = await self._answer(it, target, question, path)
             tr, full, dirs = await self._turn(ad, it, kind, f"[duet] CONSULT 답변\n{answer}\n\n{prompt}", who)
 
     async def _answer(self, it: WorkItem, target: str, question: str, path: Path) -> str:
@@ -1021,9 +1149,10 @@ class WorkBoard:
         self.orch.notice(f"[{it.id}] → {target} 협의: {question[:120]}")
         if target in ("architect", self.cfg.main):
             arch = await self._architect(it, path)
-            tr, full, _ = await self._turn(arch, it, "work_consult",
+            tr, full, dirs = await self._turn(arch, it, "work_consult",
                                            f"[duet] 작업 {it.id} 의 {it.role} 가 묻습니다:\n{question}\n"
                                            "설계 결정에 근거해 짧고 구체적으로 답하세요.", "설계자")
+            self._check_ask(dirs, it.status if it.status in ACTIVE else "implement")
             return f"설계자 답변:\n{full}"
         other = self.items.get(target)
         if not other or other.status in DONE and other.status != "merged":
@@ -1055,6 +1184,7 @@ class WorkBoard:
             await ad.close()
         text = tr.full_text or tr.text or tr.error or "(응답 없음)"
         self._thread(other, f"{it.id} 의 질문에 답변", f"Q: {question}\n\nA: {text}")
+        self._check_ask(extract_directives(text), it.status if it.status in ACTIVE else "implement")
         return f"{other.id} ({other.role}) 답변:\n{text}"
 
     async def _read_only_answer(self, req: ApprovalRequest) -> Decision:

@@ -132,10 +132,10 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
         lines.append("체크포인트 턴입니다. 지금까지의 결정 사항, 남은 일, 열린 질문을 요약하세요. "
                      "이 요약 이전의 대화는 보관 폴더로 옮겨지고, 이 요약이 이후 대화의 출발점이 됩니다. "
                      "이 턴에는 지시문을 쓰지 마세요. 진행 중이던 흐름은 오케스트레이터가 이어갑니다.")
-    elif kind in ("system", "design_questions"):
+    elif kind in ("system", "design_questions", "jev_consult"):
         lines.append(info)
     task = cfg.state.task
-    plan_only = kind == "design_questions" or bool(task and role.name != cfg.main
+    plan_only = kind in ("design_questions", "jev_consult") or bool(task and role.name != cfg.main
                      and (task["phase"] in ("plan", "plan_review") or task["waiting"]))
     if task:
         lines.append("현재 합의 작업: " + task_status(task))
@@ -146,7 +146,9 @@ def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: st
                 lines.append("plan/implement 재개는 RESUME, plan_review는 AGREE/REVISE, verify는 ACCEPT/REWORK. 취소는 CANCEL 사유.")
         if kind in ("plan", "plan_review", "implement", "verify"):
             lines.append(info)
-        if role.name == cfg.main and task["phase"] in ("plan", "implement"):
+        if kind == "jev_consult":
+            lines.append("이번 턴은 내부 기술 협의 답변입니다. 기존 합의 단계는 그대로 유지하며 AGREE/ACCEPT/RESUME 등 단계 변경 지시문은 쓰지 마세요.")
+        elif role.name == cfg.main and task["phase"] in ("plan", "implement"):
             lines.append("작업자 진행 상황을 검토해 사람에게 응답하세요. 대기 중이면 RESUME로 같은 단계를 재개하거나 CANCEL 사유로 취소할 수 있습니다.")
         elif task["phase"] == "plan":
             lines.append("계획 전문을 응답하세요. 필수: 요구 요약, 설계와 다른 점/이유, ```files 라벨 코드블록, "
