@@ -112,7 +112,7 @@ def system_append(cfg: Config, role: Role) -> str:
         from .work import PARALLEL_SYSTEM
         directives += PARALLEL_SYSTEM.replace("{max_parallel}", str(cfg.settings.get("max_parallel", 4)))
     return (common + BACKGROUND_WAIT + directives + role_guide(role) + MEMORY_SYSTEM.replace("{role}", role.name)
-            + (AGREEMENT_SYSTEM if cfg.mode.agreement or cfg.state.task else ""))
+            + (AGREEMENT_SYSTEM if cfg.mode.agreement or cfg.state.task or cfg.settings.get("coding_conventions_enabled") else ""))
 
 
 def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: str = "") -> str:

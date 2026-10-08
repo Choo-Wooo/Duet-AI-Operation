@@ -21,6 +21,7 @@ from aiohttp import WSMsgType, web
 
 from .. import commands
 from ..core.config import PERMISSION_PROFILES, ROLE_PRESETS, SUPPORTED_CLIS, Config, Role, preset_role, presets_info, validate_role_name
+from ..core.conventions import load_conventions, save_conventions
 from ..core.events import Event, EventBus
 from ..core.fsutil import is_link
 from ..core.jev_settings import clear_api_key, get_api_key, key_status, set_api_key, validate_settings as validate_jev_settings
@@ -33,6 +34,7 @@ REPLAY = 3000
 
 # 웹에서 바꿀 수 있는 설정: 키 → (형 변환, 검사, 설명)
 SETTINGS: dict[str, tuple[Any, Any, str]] = {
+    "coding_conventions_enabled": (bool, None, "새로 시작하는 작업에 저장된 코딩 컨벤션을 적용합니다. 진행 중 작업은 시작 시점의 문서로 구현·리뷰합니다."),
     "jev_mode": (str, lambda v: v in ("off", "shadow", "on"), "끔: 기존 동작 · 관찰: JEV 판단을 기록하고 기존 동작 · 적용: JEV 판단을 실행에 반영"),
     "jev_model": (str, None, "TypeSafe 결정 모델 ID (기본 jev-1.13.0)"),
     "jev_timeout_sec": (float, lambda v: 1 <= v <= 60, "JEV 응답 대기 한도(초). 오류·시간 초과는 기존 절차로 복귀"),
@@ -186,6 +188,7 @@ class WebUI:
             "settings": {k: self.cfg.settings.get(k) for k in SETTINGS},
             "settings_help": {k: v[2] for k, v in SETTINGS.items()},
             "jev": key_status(self.cfg),
+            "conventions": self._conventions_metadata(),
             "saves": self._saves(),
             "models": self.models,
             "pending": [{"id": k, "kind": v["kind"], "payload": v["payload"]} for k, v in self.pending.items()],
@@ -249,6 +252,10 @@ class WebUI:
             return {"type": "output", "text": out, "state": self.state()}
         if t == "setting":
             return self._setting(msg)
+        if t == "conventions_read":
+            return {"type": "conventions", "operation": "read", "conventions": load_conventions(self.cfg)}
+        if t == "convention_save":
+            return self._convention_save(msg)
         if t == "jev_key":
             return self._jev_key(msg)
         if t == "jev_test":
@@ -372,6 +379,8 @@ class WebUI:
         if key not in SETTINGS:
             return {"type": "output", "text": f"바꿀 수 없는 설정: {key}"}
         conv, check, _ = SETTINGS[key]
+        if key == "coding_conventions_enabled" and type(raw) is not bool:
+            return {"type": "output", "text": "코딩 컨벤션 적용 여부는 참 또는 거짓이어야 합니다.", "state": self.state()}
         if key == "jev_confidence_threshold" and type(raw) is bool:
             return {"type": "output", "text": f"{key}: 형식이 맞지 않습니다"}
         try:
@@ -385,6 +394,10 @@ class WebUI:
                 validate_jev_settings({**self.cfg.settings, key: value})
             except ValueError as e:
                 return {"type": "output", "text": str(e)}
+        if key == "coding_conventions_enabled" and value:
+            snapshot = load_conventions(self.cfg)
+            if snapshot.get("error") or not snapshot.get("content", "").strip():
+                return {"type": "output", "text": "먼저 읽을 수 있는 코딩 컨벤션 Markdown을 저장하세요.", "state": self.state()}
         if key == "usage_limit_retry":
             return {"type": "output", "text": self.orch.set_usage_retry(bool(value)), "state": self.state()}
         if key == "verification_level":
@@ -398,7 +411,31 @@ class WebUI:
         if key == "git_snapshots":
             self.orch.git.enabled = bool(value)
         self.orch.emit_status()
+        if key == "coding_conventions_enabled":
+            self._broadcast({"type": "convention_status", "conventions": self._conventions_metadata()})
+            return {"type": "output", "text": "코딩 컨벤션: 새로 시작하는 작업부터 " + ("적용합니다." if value else "적용하지 않습니다."), "state": self.state()}
         return {"type": "output", "text": f"{key} = {value}", "state": self.state()}
+
+    def _conventions_metadata(self) -> dict:
+        return {k: v for k, v in load_conventions(self.cfg).items() if k != "content"}
+
+    def _convention_save(self, msg: dict) -> dict:
+        current = load_conventions(self.cfg)
+        error = None
+        if "expected_sha256" in msg and msg["expected_sha256"] != current.get("sha256", ""):
+            error = "다른 창이나 파일에서 컨벤션이 바뀌었습니다. 저장본 다시 읽기로 내용을 확인한 뒤 저장하세요."
+        else:
+            try:
+                save_conventions(self.cfg, msg.get("content"))
+            except ValueError as exc:
+                error = str(exc)
+            except OSError:
+                error = "코딩 컨벤션을 저장할 수 없습니다. 문서 경로와 쓰기 권한을 확인하세요."
+        snapshot = load_conventions(self.cfg)
+        if not error:
+            self._broadcast({"type": "convention_status", "conventions": self._conventions_metadata()})
+        return {"type": "conventions", "operation": "save", "saved": not error,
+                "error": error, "conventions": snapshot}
 
     def _jev_key(self, msg: dict) -> dict:
         try:

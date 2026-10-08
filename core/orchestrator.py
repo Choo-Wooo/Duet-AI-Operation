@@ -198,9 +198,14 @@ class Orchestrator:
         self.emit_status()
         return "사용량 한도 자동 대기·재개: " + ("켜짐" if on else "꺼짐 (대기 취소)")
 
-    async def run_agent_turn(self, ad, prompt):
+    async def run_agent_turn(self, ad, prompt, *, conventions=None):
         from .verification import verification_guide
+        from .conventions import load_conventions, conventions_guide
         prompt += "\n" + verification_guide(self.cfg.settings)
+        snapshot = load_conventions(self.cfg) if conventions is None else conventions
+        if snapshot.get("enabled") and snapshot.get("error"):
+            return TurnResult("", ok=False, error="코딩 컨벤션: " + snapshot["error"])
+        prompt += "\n" + conventions_guide(snapshot)
         watcher = asyncio.create_task(self.jev.watch(ad)) if self.jev.enabled("flow") else None
         try:
             return await self.usage.run(ad, prompt)
@@ -1001,6 +1006,17 @@ class Orchestrator:
             raise
 
     async def _run_turn_active(self, role_name: str, kind: str, info: str) -> tuple[TurnResult, Turn] | None:
+        from .conventions import load_conventions
+        task = self.cfg.state.task
+        conventions = task.get("conventions") if task else None
+        if conventions is None or conventions.get("error"):
+            conventions = load_conventions(self.cfg)
+            if conventions.get("enabled") and conventions.get("error"):
+                self.notice("코딩 컨벤션을 확인한 뒤 다시 시작하세요: " + conventions["error"], "warn")
+                return None
+            if task:
+                task["conventions"] = conventions
+                self.cfg.save_state()
         try:
             ad = await self.adapter(role_name)
         except Exception as e:
@@ -1044,7 +1060,7 @@ class Orchestrator:
         self.bus.emit("turn_start", role_name, n=n, kind=kind, info=info)
         self.emit_status()
 
-        tr = await self.run_agent_turn(ad, prompt)
+        tr = await self.run_agent_turn(ad, prompt, conventions=conventions)
         if not tr.ok and tr.context_overflow and not tr.interrupted and not self.stop_requested:
             # 입력 한도 초과: 같은 세션으로는 다시 해도 실패하므로 새 세션으로 한 번 자동 재시도
             self.notice(f"{role_name} 입력이 모델 한도를 넘었습니다. 새 세션으로 이 턴을 다시 실행합니다.", "warn",
@@ -1052,11 +1068,12 @@ class Orchestrator:
             try:
                 ad = await self._rotate_session(role_name, "입력 한도 초과 오류")
                 prepare(ad)
-                tr = await self.run_agent_turn(ad, prompt)
+                tr = await self.run_agent_turn(ad, prompt, conventions=conventions)
             except Exception as e:
                 tr.error = f"{tr.error} / 새 세션 재시도 실패: {e}"
 
         self.running_role = None
+        tr.__dict__["conventions"] = conventions
         self._keep_memory(role_name, tr)
         self._remember_session(role_name, ad)
         # plan 작업자는 파일을 쓰지 않는다. 전문은 계획서에, 요약만 대화에 기록한다.
@@ -1133,6 +1150,11 @@ class Orchestrator:
         if not tr.ok or tr.interrupted or self.stop_requested:
             self._wait_task(tr.error or "턴 중단")
             return None
+        convention_report = tr.full_text or tr.text or turn.body
+        # Agents may write the review directly to DIALOGUE and only acknowledge
+        # that write in their response. Validate the same turn as its directives.
+        if turn.body != tr.text and re.search(r"(?m)^[ \t]{0,3}(?:`{3,}|~{3,})[ \t]*duet-conventions\b", turn.body):
+            convention_report = turn.body
         if self.design.enabled:
             if kind == "design_questions":
                 self.design.initial_answer(tr.full_text or tr.text or turn.body)
@@ -1157,7 +1179,7 @@ class Orchestrator:
                     return self._plan_retry(role, '계획 제출 형식을 지켜 주세요.')
             if getattr(tr, 'plan_error', None):
                 return self._plan_retry(role, tr.error)
-            return await self._decide_task(role, kind, turn)
+            return await self._decide_task(role, kind, turn, review_text=convention_report)
         flow_commands = {"PLAN", "AGREE", "REVISE", "ACCEPT", "REWORK", "RESUME", "CANCEL"}
         if any(k in flow_commands for k, _ in turn.directives):
             if not (role == self.cfg.main and (WORK_BLOCK.search(tr.full_text or tr.text or "")
@@ -1176,6 +1198,16 @@ class Orchestrator:
             return None
         main = self.cfg.main
         if role == main:
+            if turn.directive("STATUS") == "done":
+                from .conventions import load_conventions, validate_convention_report
+                snapshot = getattr(tr, "conventions", None)
+                if snapshot is None:
+                    snapshot = load_conventions(self.cfg)
+                issue = validate_convention_report(convention_report, snapshot)
+                if issue:
+                    self.notice("완료 보류: " + issue, "warn")
+                    return (main, "system", "코딩 컨벤션 확인이 끝나지 않았습니다: " + issue
+                            + " 실제 변경을 검토해 규칙별 근거를 보완하거나 위반을 재작업시키세요. 통과 전 STATUS done을 내지 마세요.")
             for msg in self.work.handle_directives(turn.directives):
                 self.notice(msg)
             try:
@@ -1203,13 +1235,19 @@ class Orchestrator:
                 return None
             task = turn.directive("TASK") or f"DIALOGUE.md #{turn.n} 의 지시를 따르세요."
             self.task_history.append(_norm(task))
-            if self.cfg.mode.agreement:
+            from .conventions import load_conventions
+            conventions = load_conventions(self.cfg)
+            if conventions.get("enabled") and conventions.get("error"):
+                self.notice("위임 보류: 코딩 컨벤션 " + conventions["error"], "warn")
+                return None
+            if self.cfg.mode.agreement or conventions.get("enabled"):
                 if not self.cfg.state.auto:
                     answer = await self.ui.ask_choice("위임 확인", f"{self.cfg.main} → {target}\n\n{task}",
                                                       [("yes", "계획부터 진행"), ("no", "취소")])
                     if answer != "yes":
                         return None
                 self.cfg.state.task = new_task(target, task, git_head(self.project), self._fingerprint())
+                self.cfg.state.task["conventions"] = conventions
                 self.current_task[target] = task
                 self._phase("plan", previous=None)
                 return (target, "plan", task)
@@ -1314,7 +1352,7 @@ class Orchestrator:
             self.cfg.save_state()
         return (self.cfg.main, "plan_review", f"계획 제출 턴 #{turn.n}")
 
-    async def _decide_task(self, role: str, kind: str, turn: Turn) -> Next | None:
+    async def _decide_task(self, role: str, kind: str, turn: Turn, *, review_text: str | None = None) -> Next | None:
         task = self.cfg.state.task
         assert task
         main, worker, phase = self.cfg.main, task["role"], task["phase"]
@@ -1427,6 +1465,19 @@ class Orchestrator:
                 self._phase("implement")
                 return (worker, "implement", f"메인 #{turn.n} 재작업 요청: {arg}. 범위 변경은 deviation으로 보고하세요.")
             if action == "ACCEPT" and not arg:
+                from .conventions import load_conventions, validate_convention_report
+                snapshot = task.get("conventions")
+                if snapshot is None:
+                    snapshot = load_conventions(self.cfg)
+                    task["conventions"] = snapshot
+                issue = validate_convention_report(review_text if review_text is not None else turn.body, snapshot)
+                if snapshot.get("enabled"):
+                    self.bus.emit("convention_check", role, task_id=task["id"], sha256=snapshot.get("sha256"),
+                                  passed=issue is None, error=issue)
+                if issue:
+                    self.notice("ACCEPT 보류: " + issue, "warn")
+                    return (main, "verify", "코딩 컨벤션 확인이 누락되었거나 통과하지 못했습니다: " + issue
+                            + " 규칙별 코드 위치·검사 결과를 보완하세요. 위반이 있으면 REWORK 사유로 구현자에게 돌려보내세요.")
                 self._finish_task("accepted")
                 if next_delegate or WORK_BLOCK.search(turn.body or ""):
                     # 같은 턴의 다음 DELEGATE·duet-work 블록은 완료 후 일반 경로로 처리한다.

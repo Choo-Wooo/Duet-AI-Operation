@@ -14,6 +14,7 @@ from .agreement import EXCLUDED_DIRS, EXCLUDED_FILES, validate_task
 from .storage import atomic_write, load_json
 from .jev_settings import JEV_DEFAULTS, validate_settings as validate_jev_settings
 from .verification import DEFAULT_VERIFICATION_LEVEL, VERIFICATION_LEVELS
+from .conventions import CONVENTION_DEFAULTS
 
 
 def validate_role_name(name: str) -> None:
@@ -197,7 +198,7 @@ class Config:
                                # 전권 자동 수락: 모드와 상관없이 승인·선택을 사람에게 묻지 않음 (autopilot_deny 만 막음)
                                "full_auto": False, "design_questions": False,
                                "usage_limit_retry": False, "usage_limit_wait_sec": 18000,
-                               "usage_limit_max_retries": 3, **JEV_DEFAULTS}
+                               "usage_limit_max_retries": 3, **JEV_DEFAULTS, **CONVENTION_DEFAULTS}
         self.runtime: dict = {}  # 이번 실행에만 쓰는 값 (예산 등, 저장 안 함)
 
     # ---------- 로드 ----------
@@ -206,6 +207,8 @@ class Config:
         self.main = data.get("main", "architect")
         self.settings.update(data.get("settings") or {})
         validate_jev_settings(self.settings)
+        if type(self.settings["coding_conventions_enabled"]) is not bool:
+            raise ValueError("settings.coding_conventions_enabled는 true/false여야 합니다")
         if self.settings["verification_level"] not in tuple(VERIFICATION_LEVELS):
             raise ValueError("settings.verification_level은 functional, balanced, thorough 중 하나입니다")
         if type(self.settings["plan_rounds"]) is not int or self.settings["plan_rounds"] < 1:
@@ -267,6 +270,8 @@ class Config:
     # ---------- 저장 ----------
     def save_roles(self) -> None:
         validate_jev_settings(self.settings)
+        if type(self.settings.get("coding_conventions_enabled", False)) is not bool:
+            raise ValueError("settings.coding_conventions_enabled는 true/false여야 합니다")
         _dump_yaml(
             self.roles_file,
             {"main": self.main, "settings": self.settings,

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from .agreement import clean_command, parse_plan
+from .conventions import conventions_guide, load_conventions, validate_convention_report
 from .dialogue import extract_directives
 from .policy import ApprovalRequest, Decision, Policy, AUTO, read_only_decision
 from .procs import close_transport, create_shell, kill_tree, sweep
@@ -132,6 +133,7 @@ class WorkItem:
     baseline_code: int | None = None  # 합의 직후(구현 전) 같은 test_command 의 종료 코드
     baseline_out: str = ""
     baseline_waived: bool = False  # 설계자가 "남은 실패는 구현 전부터 있던 것" 으로 확인함
+    conventions: dict | None = None  # 등록 시 고정한 규칙. None 은 이전 버전 작업으로 처음 재개할 때 캡처
 
     @property
     def thread(self) -> str:
@@ -344,7 +346,8 @@ class WorkBoard:
             if not isinstance(files, list):
                 files = []
             new.append(WorkItem(id=wid, role=role, task=task, depends_on=list(deps),
-                                files_hint=[str(f) for f in files], from_turn=from_turn))
+                                files_hint=[str(f) for f in files], from_turn=from_turn,
+                                conventions=load_conventions(self.cfg)))
         known = {i.id for i in new} | set(self.items)
         for it in new:
             for d in it.depends_on:
@@ -426,6 +429,10 @@ class WorkBoard:
         if getattr(self.orch, "design", None) and self.orch.design.blocked(it.role + "#" + wid):
             return f"{wid}: 실제 사용자 설계 답변 대기"
         phase = it.status.split(":", 1)[1] if ":" in it.status else "plan"
+        # An unreadable/missing convention file can be repaired while this item
+        # waits. Valid snapshots remain pinned even if project settings change.
+        if it.conventions is not None and it.conventions.get("error"):
+            it.conventions = load_conventions(self.cfg)
         if it.negotiations >= it.negotiation_limit:
             it.negotiation_limit += 6
         it.resume_at = phase if phase in ("verify", "merging") and it.agreed_files else ""
@@ -606,6 +613,7 @@ class WorkBoard:
                     self.orch.set_activity(ad.label, 'idle')
 
     async def _turn(self, ad, it: WorkItem, kind: str, prompt: str, who: str):
+        snapshot = self._conventions(it)
         await self.orch.not_paused.wait()
         ad.turn_kind = kind
         if getattr(self.orch, "design", None) and self.orch.design.enabled:
@@ -616,7 +624,10 @@ class WorkBoard:
         self.orch.bus.emit("turn_start", ad.label, n=0, kind=kind, info=it.id)
         try:
             runner = getattr(self.orch, "run_agent_turn", None)
-            tr = await runner(ad, prompt) if runner else await ad.run_turn(prompt)
+            if runner:
+                tr = await runner(ad, prompt, conventions=snapshot)
+            else:
+                tr = await ad.run_turn(prompt + "\n" + conventions_guide(snapshot))
         except BaseException as e:
             self.orch.bus.emit('turn_end', ad.label, ok=False, error=str(e),
                                interrupted=isinstance(e, asyncio.CancelledError))
@@ -632,8 +643,18 @@ class WorkBoard:
         return tr, full or "", extract_directives(full or "")
 
     # ---------------- 한 작업의 진행 ----------------
+    def _conventions(self, it: WorkItem) -> dict:
+        if it.conventions is None:
+            it.conventions = load_conventions(self.cfg)
+            self.save()
+        if it.conventions.get("enabled") and it.conventions.get("error"):
+            phase = it.status if it.status in ACTIVE and it.status != "queued" else "plan"
+            raise _Wait(phase, "코딩 컨벤션을 읽을 수 없습니다: " + str(it.conventions["error"]))
+        return it.conventions
+
     async def _run(self, it: WorkItem) -> None:
         try:
+            self._conventions(it)
             assert self.wt and self.base
             path = await asyncio.to_thread(self.wt.create, it.id, self.base)
             if not it.agreed_files:
@@ -875,6 +896,7 @@ class WorkBoard:
 
     async def _verify(self, it: WorkItem, path: Path, report: str) -> str | None:
         """합의 테스트를 실행하고 설계자 분신이 검토. 재작업 사유(통과면 None)."""
+        snapshot = self._conventions(it)
         self._touch(it, "verify")
         code, out = await self._run_test(it, path, it.test_command)
         self._thread(it, "duet · 테스트", f"$ {it.test_command}\nexit {code}\n```\n{out[-2000:]}\n```")
@@ -903,6 +925,9 @@ class WorkBoard:
             return rework or "설계자가 재작업을 요청했습니다."
         accept = next((v for k, v in dirs if k == "ACCEPT"), None)
         if accept is not None:
+            if convention_error := validate_convention_report(full, snapshot):
+                self._thread(it, "duet · 코딩 컨벤션", convention_error)
+                return "코딩 컨벤션 검증 보완 필요: " + convention_error
             if code != 0:
                 if baseline_failed and accept.strip().lower().startswith("baseline"):
                     it.baseline_waived = True
@@ -1012,7 +1037,8 @@ class WorkBoard:
             ad.turn_kind = "work_consult"
             self.orch.bus.emit('turn_start', ad.label, kind='work_consult', info=other.id)
             tr = await ad.run_turn(f"[duet] 병렬 작업 {it.id} ({it.role}) 가 당신의 작업 {other.id} 에 대해 묻습니다 "
-                                   f"(읽기 전용 복제본이 답합니다. 파일을 고치지 마세요):\n{question}")
+                                   f"(읽기 전용 복제본이 답합니다. 파일을 고치지 마세요):\n{question}"
+                                   + "\n" + conventions_guide(self._conventions(other)))
             self.orch.bus.emit('turn_end', ad.label, ok=tr.ok, error=tr.error, interrupted=tr.interrupted)
         except BaseException as e:
             self.orch.bus.emit('turn_end', ad.label, ok=False, error=str(e), interrupted=isinstance(e, asyncio.CancelledError))

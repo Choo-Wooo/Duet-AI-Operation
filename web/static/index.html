@@ -271,6 +271,16 @@ td button { white-space: nowrap; margin-bottom: 4px; }
             <div id="jevLast" class="help"></div>
             <div class="help">키는 이 프로젝트의 비공개 파일에 별도 저장하며 세션 저장본에는 포함하지 않습니다. 저장 키가 없으면 <code>TYPESAFE_API_KEY</code> 환경변수를 사용합니다. 연결 확인은 작은 API 요청 1회를 보냅니다.</div>
           </div>
+          <div class="card" id="conventionsCard"><h4>코딩 컨벤션</h4>
+            <label class="row" style="margin-top:0"><input type="checkbox" id="conventionsEnabled"> 새로 시작하는 작업에 적용</label>
+            <div class="help">Markdown을 직접 작성하거나 <code>.md</code> 파일을 불러온 뒤 저장하세요. 구현자와 리뷰어가 같은 문서를 받아 규칙별 준수 여부와 코드·검증 근거를 확인합니다. 진행 중 작업은 시작 시점의 문서를 유지합니다.</div>
+            <div class="row"><label for="conventionsFile">Markdown 파일</label><input id="conventionsFile" type="file" accept=".md,text/markdown" style="flex:1;min-width:180px"><button id="conventionsReload">저장본 다시 읽기</button></div>
+            <label for="conventionsContent" class="help">컨벤션 내용 (UTF-8 최대 32 KiB)</label>
+            <textarea id="conventionsContent" rows="12" spellcheck="false" placeholder="# 코딩 컨벤션&#10;&#10;- 함수와 변수는 snake_case를 사용한다.&#10;- 변경한 동작은 관련 테스트로 확인한다." style="width:100%;margin-top:6px;font-family:var(--mono);resize:vertical"></textarea>
+            <div class="row"><button id="conventionsSave" class="primary">컨벤션 저장</button><span id="conventionsDraft" class="help" role="status"></span></div>
+            <div id="conventionsState" class="help" role="status"></div>
+            <div class="help">프로젝트의 <code>docs/CODING_CONVENTIONS.md</code>에 저장합니다. 파일을 고르는 것만으로 저장되거나 적용되지 않습니다. 문서에 적힌 명령을 업로드 시 실행하지 않습니다.</div>
+          </div>
           <div class="card"><h4>진행 설정</h4><div class="grid2" id="settings"></div></div>
           <div class="card"><h4>시작 안내</h4><pre id="startup" class="dim"></pre></div>
         </div></div>
@@ -424,7 +434,7 @@ function toast(text) { if (!text) return; const t = $("#toast"); t.textContent =
 function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${token ? "?t=" + encodeURIComponent(token) : ""}`);
   ws.onopen = () => { const c = $("#conn"); c.textContent = "연결"; c.title = "서버에 연결됨"; c.classList.remove("off"); };
-  ws.onclose = () => { const c = $("#conn"); c.textContent = "끊김"; c.title = "연결 끊김 — 재시도 중"; c.classList.add("off"); setTimeout(connect, 1500); };
+  ws.onclose = () => { const c = $("#conn"); c.textContent = "끊김"; c.title = "연결 끊김 — 재시도 중"; c.classList.add("off"); conventionEditor.loading = false; conventionEditor.saving = null; conventionEditor.loaded = false; setTimeout(connect, 1500); };
   ws.onmessage = m => onMessage(JSON.parse(m.data));
 }
 
@@ -440,6 +450,8 @@ function onMessage(msg) {
     case "event": onEvent(msg); break;
     case "state": setState(msg.state); break;
     case "output": toast(msg.text); if (msg.state) setState(msg.state); break;
+    case "conventions": receiveConventions(msg); break;
+    case "convention_status": if (S) { S.conventions = msg.conventions; renderConventions(); } break;
     case "pending": showPending(msg); break;
     case "resolved": { const el = document.getElementById("p-" + msg.id); if (el) el.remove(); updateBadges(); break; }
     case "models": S.models = msg.models; renderModels(); renderRoles(); toast("모델 목록을 갱신했습니다."); break;
@@ -783,6 +795,82 @@ function renderJevStatus(v) {
   const purposes = {choice: "자동 선택", approval: "승인 판단", approval_confirm: "승인 재확인", flow: "정체 판단", handoff: "인계 판단", idle: "응답 대기 판단"};
   $("#jevLast").textContent = last ? `최근: ${purposes[last.purpose] || last.purpose} · ${last.mode === "shadow" ? "관찰" : "적용"} · ${last.error ? "오류: " + last.error : "판단 완료"}` : "아직 JEV 관제 판단이 없습니다. 연결 확인 사용량은 위 집계에 포함하지 않습니다.";
 }
+const conventionEditor = {loaded: false, loading: false, dirty: false, saving: null, version: "", revision: 0, readRid: null};
+function readConventions() {
+  if (conventionEditor.loading || conventionEditor.saving) return;
+  const request = {type: "conventions_read"};
+  if (send(request)) { conventionEditor.loading = true; conventionEditor.readRid = request.rid; }
+  else toast("서버에 연결된 뒤 다시 읽으세요.");
+}
+function receiveConventions(msg) {
+  if (!S) return;
+  const v = msg.conventions || {}, input = $("#conventionsContent");
+  S.conventions = {...v}; delete S.conventions.content;
+  if (msg.operation === "save") {
+    const pending = conventionEditor.saving;
+    if (!pending || pending.rid !== msg.rid) return;
+    conventionEditor.saving = null;
+    if (msg.saved) {
+      conventionEditor.version = v.sha256 || "";
+      conventionEditor.dirty = input.value !== pending.content;
+      toast("코딩 컨벤션을 저장했습니다. 새로 시작하는 작업부터 적용됩니다.");
+    } else toast(msg.error || "컨벤션을 저장하지 못했습니다.");
+  } else {
+    if (msg.rid !== conventionEditor.readRid) return;
+    conventionEditor.loading = false;
+    if (!conventionEditor.dirty) {
+      input.value = v.content || "";
+      conventionEditor.version = v.sha256 || "";
+    }
+    if (v.error) toast(v.error);
+  }
+  conventionEditor.loaded = true;
+  renderConventions();
+}
+function renderConventions() {
+  if (!S || !S.conventions) return;
+  const v = S.conventions, input = $("#conventionsContent");
+  const enabled = $("#conventionsEnabled"); enabled.checked = !!v.enabled;
+  enabled.onchange = () => {
+    if (conventionEditor.dirty && enabled.checked) { enabled.checked = !!v.enabled; toast("편집한 컨벤션을 먼저 저장한 뒤 적용하세요."); return; }
+    if (!send({type: "setting", key: "coding_conventions_enabled", value: enabled.checked})) { enabled.checked = !!v.enabled; toast("서버에 연결된 뒤 다시 적용하세요."); }
+  };
+  $("#conventionsState").textContent = `${v.path || "docs/CODING_CONVENTIONS.md"} · ${v.sha256 ? "저장 버전 " + v.sha256.slice(0, 12) : "아직 저장하지 않음"} · ${v.enabled ? "새 작업에 적용" : "적용 꺼짐"}${v.error ? " · 오류: " + v.error : ""}`;
+  const bytes = new TextEncoder().encode(input.value || "").length;
+  const changed = conventionEditor.loaded && conventionEditor.version !== (v.sha256 || "");
+  $("#conventionsDraft").textContent = `${bytes.toLocaleString()} / 32,768 바이트` + (conventionEditor.saving ? " · 저장 중…" : conventionEditor.dirty ? " · 저장하지 않은 편집" : "") + (changed ? " · 저장본 변경됨: 다시 읽기 필요" : "");
+  $("#conventionsSave").disabled = !conventionEditor.loaded || !!conventionEditor.saving || bytes > 32768 || !input.value.trim();
+  $("#conventionsReload").disabled = conventionEditor.loading || !!conventionEditor.saving;
+  input.oninput = () => { conventionEditor.dirty = true; conventionEditor.revision++; renderConventions(); };
+  $("#conventionsReload").onclick = () => {
+    if (conventionEditor.dirty && !confirm("저장하지 않은 편집을 버리고 저장본을 다시 읽을까요?")) return;
+    conventionEditor.dirty = false; readConventions(); renderConventions();
+  };
+  $("#conventionsSave").onclick = () => {
+    const content = input.value;
+    if (conventionEditor.saving || !conventionEditor.loaded) return;
+    if (!content.trim() || new TextEncoder().encode(content).length > 32768) { toast("빈 문서는 저장할 수 없습니다. UTF-8 32 KiB 이내로 작성하세요."); return; }
+    const request = {type: "convention_save", content, expected_sha256: conventionEditor.version};
+    if (send(request)) conventionEditor.saving = {rid: request.rid, content};
+    else toast("서버에 연결된 뒤 다시 저장하세요.");
+    renderConventions();
+  };
+  $("#conventionsFile").onchange = async e => {
+    const file = e.target.files && e.target.files[0]; e.target.value = "";
+    if (!file) return;
+    if (!/\.md$/i.test(file.name) || file.size > 32768) { toast("32 KiB 이하의 .md 파일을 선택하세요."); return; }
+    const revision = ++conventionEditor.revision;
+    try {
+      const text = await file.text();
+      if (revision !== conventionEditor.revision) return;
+      if (new TextEncoder().encode(text).length > 32768) { toast("UTF-8 32 KiB 이하의 문서만 저장할 수 있습니다."); return; }
+      input.value = text; conventionEditor.dirty = true;
+      toast(`${file.name}을 편집기에 불러왔습니다. 컨벤션 저장을 눌러 반영하세요.`);
+      renderConventions();
+    } catch (_) { toast("파일을 읽지 못했습니다."); }
+  };
+  if (!conventionEditor.loaded && !conventionEditor.loading) readConventions();
+}
 function renderSettings() {
   const box = $("#settings"); if (!S) return;
   const fa = !!S.settings.full_auto, active = !!(S.status && S.status.full_auto);
@@ -805,7 +893,8 @@ function renderSettings() {
   $("#jevKeyClear").onclick = () => send({type: "jev_key", action: "clear"});
   $("#jevTest").onclick = () => { toast("JEV 연결을 확인합니다…"); send({type: "jev_test"}); };
   $("#jevSettings").querySelectorAll("[data-k]").forEach(el => el.onchange = () => send({type: "setting", key: el.dataset.k, value: el.type === "checkbox" ? el.checked : el.value}));
-  box.innerHTML = Object.entries(S.settings).filter(([k]) => k !== "full_auto" && !k.startsWith("jev_")).map(([k, v]) => {
+  renderConventions();
+  box.innerHTML = Object.entries(S.settings).filter(([k]) => !["full_auto", "coding_conventions_enabled"].includes(k) && !k.startsWith("jev_")).map(([k, v]) => {
     const input = k === "verification_level" ? `<select data-k="${k}">${[["functional", "핵심 기능 검증 (기본)"], ["balanced", "균형 검증"], ["thorough", "전체 검증 (꼼꼼하게)"]].map(([value, label]) => `<option value="${value}" ${v === value ? "selected" : ""}>${label}</option>`).join("")}</select>` :
       typeof v === "boolean" ? `<input type="checkbox" data-k="${k}" ${v ? "checked" : ""}>` :
       typeof v === "number" ? `<input type="number" data-k="${k}" value="${v}">` : `<input type="text" data-k="${k}" value="${esc(v ?? "")}" style="width:100%">`;
