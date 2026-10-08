@@ -210,7 +210,7 @@ def test_h8_blocked_reports(repo, status):
     asyncio.run(go())
 
 
-def test_h8_restart_starts_once(repo, monkeypatch):
+def test_h8_restart_waits_until_explicit_resume_then_starts_once(repo, monkeypatch):
     b = board(repo)
     b.items['ready'] = WorkItem('ready', 'implementer', 'ready')
     b.save()
@@ -224,8 +224,84 @@ def test_h8_restart_starts_once(repo, monkeypatch):
         await orch.run(None)
         await asyncio.sleep(0)
         await orch.run(None)
+        assert calls == []
+        assert orch.inbox.empty()
+        assert orch.work.items['ready'].status == 'waiting:queued'
+        assert orch.work.resume('ready') == 'ready 재개'
+        await asyncio.sleep(0)
+        orch.work.start()
         assert calls == ['ready']
         await orch.work.close()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize('status', ['queued', 'plan', 'plan_review', 'implement', 'verify', 'merging',
+                                        'blocked', 'waiting:implement', 'merged', 'failed', 'cancelled'])
+def test_restart_history_never_starts_a_turn_without_user_input(repo, monkeypatch, status):
+    b = board(repo)
+    b.items['old'] = WorkItem('old', 'implementer', 'old task', status=status)
+    b.save()
+    orch = Orchestrator(b.cfg, EventBus(), SimpleNamespace(), fake=True)
+    orch.cfg.settings['full_auto'] = True
+    orch.dialogue.ensure()
+    orch.dialogue.append_turn('architect', 1, 'Old instruction: resume the old task.')
+    before = orch.dialogue.path.read_bytes()
+    run = AsyncMock()
+    worker = AsyncMock()
+    monkeypatch.setattr(orch, 'run', run)
+    monkeypatch.setattr(orch.work, '_run', worker)
+
+    async def go():
+        server = asyncio.create_task(orch.serve())
+        try:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            run.assert_not_awaited()
+            worker.assert_not_awaited()
+            assert orch.inbox.empty() and not orch.work.tasks
+            assert orch.dialogue.path.read_bytes() == before
+            item = orch.work.items['old']
+            expected = ('waiting:queued' if status in ('queued', 'blocked') else
+                        'waiting:' + status if status in ('plan', 'plan_review', 'implement', 'verify', 'merging')
+                        else status)
+            assert item.status == expected
+            # -m/--message and ordinary fresh input still start immediately.
+            orch.submit('A new explicit request')
+            await asyncio.sleep(0)
+            run.assert_awaited_once()
+            assert run.await_args.args[0][:2] == ('architect', 'human')
+            worker.assert_not_awaited()
+        finally:
+            server.cancel()
+            await asyncio.gather(server, return_exceptions=True)
+            await orch.close()
+
+    asyncio.run(go())
+
+
+def test_restarted_work_reports_new_result_after_explicit_resume(repo, monkeypatch):
+    b = board(repo)
+    b.items['old'] = WorkItem('old', 'implementer', 'old task', status='waiting:implement')
+    b.save()
+    b = board(repo)
+
+    async def worker(item):
+        b._touch(item, 'merged')
+
+    monkeypatch.setattr(b, '_run', worker)
+
+    async def go():
+        b.start()
+        assert b.orch.inbox.empty()
+        assert b.resume('old') == 'old 재개'
+        await b.tasks.pop('old')
+        b.schedule()
+        assert b.orch.inbox.get_nowait() == (None, REPORT_TRIGGER)
+        b.report_prompt()
+        b.schedule()
+        assert b.orch.inbox.empty()
+        await b.close()
+
     asyncio.run(go())
 
 

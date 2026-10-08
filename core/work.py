@@ -248,9 +248,17 @@ class WorkBoard:
             except TypeError:
                 continue
             it.test_command = clean_command(it.test_command)  # 예전에 백틱째 저장된 명령 정리
-            if it.status in ACTIVE and it.status != "queued":
-                it.wait_reason = f"duet 재시작으로 {it.status} 단계에서 멈춤 — RESUME_WORK {it.id} 로 재개"
-                it.status = "waiting:" + it.status
+            if it.status in ACTIVE or it.status == "blocked":
+                phase = "queued" if it.status == "blocked" else it.status
+                previous_reason = f" ({it.wait_reason})" if it.wait_reason else ""
+                it.wait_reason = (f"duet 재시작으로 {it.status} 단계에서 멈춤 — "
+                                  f"작업 보드 또는 /work resume {it.id} 로 재개{previous_reason}")
+                it.status = "waiting:" + phase
+            # Loading history is not a new work event. Otherwise start() reports
+            # every old completion/wait to the main agent, which can resume old
+            # work without any input. A later explicit resume/status change
+            # clears this flag in _touch() and reports its new result normally.
+            it.__dict__["_reported"] = True
             self.items[it.id] = it
 
     def save(self) -> None:

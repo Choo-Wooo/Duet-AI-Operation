@@ -405,6 +405,8 @@ Enter는 일반 전송, Shift+Enter는 줄바꿈임. Ctrl+Enter(macOS에서는 C
 
 병렬 작업을 대기·진행·완료·중단으로 나눠 표시함. 각 카드에는 역할, 단계(plan, plan_review, implement, verify, merging, merged), 의존 관계, 합의된 파일, 병합 커밋이 표시되고, 작업 기록 보기·재개·취소를 할 수 있음.
 
+재시작하면 저장된 미완료 작업은 대기 상태로 복원함. 이전 완료·대기 이력만으로 모델을 자동 호출하지 않으며, 작업 보드의 **재개** 또는 `/work resume <id>`로 명시적으로 다시 진행함. 새로 입력하는 작업은 정상적으로 시작함.
+
 ![작업 보드](docs/images/web-board.png)
 
 #### 문서
