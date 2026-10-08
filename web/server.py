@@ -23,6 +23,7 @@ from .. import commands
 from ..core.config import PERMISSION_PROFILES, ROLE_PRESETS, SUPPORTED_CLIS, Config, Role, preset_role, presets_info, validate_role_name
 from ..core.events import Event, EventBus
 from ..core.fsutil import is_link
+from ..core.jev_settings import clear_api_key, get_api_key, key_status, set_api_key, validate_settings as validate_jev_settings
 from ..core.models import read_cache, refresh
 from ..core.orchestrator import Orchestrator
 from ..core.policy import ApprovalRequest, Decision, read_only_decision
@@ -32,6 +33,13 @@ REPLAY = 3000
 
 # 웹에서 바꿀 수 있는 설정: 키 → (형 변환, 검사, 설명)
 SETTINGS: dict[str, tuple[Any, Any, str]] = {
+    "jev_mode": (str, lambda v: v in ("off", "shadow", "on"), "끔: 기존 동작 · 관찰: JEV 판단을 기록하고 기존 동작 · 적용: JEV 판단을 실행에 반영"),
+    "jev_model": (str, None, "TypeSafe 결정 모델 ID (기본 jev-1.13.0)"),
+    "jev_timeout_sec": (float, lambda v: 1 <= v <= 60, "JEV 응답 대기 한도(초). 오류·시간 초과는 기존 절차로 복귀"),
+    "jev_confidence_threshold": (float, lambda v: 0 <= v <= 1, "모든 JEV 판단에 적용할 최소 확신값 (0~1, 기본 0.8). 미달하면 기존 절차로 복귀"),
+    "jev_choices": (bool, None, "자동 모드의 선택지를 작업 맥락에 따라 판단"),
+    "jev_approvals": (bool, None, "승인 정책으로 결정하지 못한 요청을 판단. 명시적 보호·금지 정책은 유지"),
+    "jev_flow": (bool, None, "턴 종료 시 정체·반복 진행 신호와 다음 역할로의 인계를 판단"),
     "verification_level": (str, lambda v: v in ("functional", "balanced", "thorough"),
                            "핵심 기능(기본): 정상 동작만 테스트, 예외·위험은 미검증 보고만 · 균형: 관련 회귀·경계까지 · 전체: 모든 기준·전체 테스트. 다음 턴부터 적용하며 기존 합의 명령은 유지합니다."),
     "usage_limit_retry": (bool, None, "사용량 한도 자동 대기·재개 (기본 꺼짐, 앱 실행 중에만 동작)"),
@@ -73,6 +81,7 @@ class WebUI:
         self.pending: dict[str, dict] = {}  # id -> {kind, payload, future}
         self.asks: dict[str, Any] = {}  # 질문 패널 세션 (역할별)
         self.ask_lock = asyncio.Lock()
+        self.jev_test_lock = asyncio.Lock()
         self._steer_tasks: set[asyncio.Task] = set()
         self.models: dict | None = read_cache(cfg.dir)
         from ..core.config import detect_clis
@@ -176,6 +185,7 @@ class WebUI:
                       for n, m in self.cfg.modes.items()},
             "settings": {k: self.cfg.settings.get(k) for k in SETTINGS},
             "settings_help": {k: v[2] for k, v in SETTINGS.items()},
+            "jev": key_status(self.cfg),
             "saves": self._saves(),
             "models": self.models,
             "pending": [{"id": k, "kind": v["kind"], "payload": v["payload"]} for k, v in self.pending.items()],
@@ -239,6 +249,10 @@ class WebUI:
             return {"type": "output", "text": out, "state": self.state()}
         if t == "setting":
             return self._setting(msg)
+        if t == "jev_key":
+            return self._jev_key(msg)
+        if t == "jev_test":
+            return await self._jev_test()
         if t == "mode":
             out = o.set_mode(str(msg.get("name")))
             return {"type": "output", "text": out, "state": self.state()}
@@ -358,12 +372,19 @@ class WebUI:
         if key not in SETTINGS:
             return {"type": "output", "text": f"바꿀 수 없는 설정: {key}"}
         conv, check, _ = SETTINGS[key]
+        if key == "jev_confidence_threshold" and type(raw) is bool:
+            return {"type": "output", "text": f"{key}: 형식이 맞지 않습니다"}
         try:
             value = _to_bool(raw) if conv is bool else conv(raw)
         except (TypeError, ValueError):
             return {"type": "output", "text": f"{key}: 형식이 맞지 않습니다"}
         if check and not check(value):
             return {"type": "output", "text": f"{key}: 허용 범위를 벗어났습니다"}
+        if key.startswith("jev_"):
+            try:
+                validate_jev_settings({**self.cfg.settings, key: value})
+            except ValueError as e:
+                return {"type": "output", "text": str(e)}
         if key == "usage_limit_retry":
             return {"type": "output", "text": self.orch.set_usage_retry(bool(value)), "state": self.state()}
         if key == "verification_level":
@@ -379,6 +400,43 @@ class WebUI:
         self.orch.emit_status()
         return {"type": "output", "text": f"{key} = {value}", "state": self.state()}
 
+    def _jev_key(self, msg: dict) -> dict:
+        try:
+            if msg.get("action") == "save":
+                set_api_key(self.cfg, msg.get("key"))
+                text = "JEV API 키를 저장했습니다. 연결 확인으로 인증을 검사할 수 있습니다."
+            elif msg.get("action") == "clear":
+                clear_api_key(self.cfg)
+                text = "저장된 JEV API 키를 삭제했습니다."
+                if key_status(self.cfg)["source"] == "environment":
+                    text += " TYPESAFE_API_KEY 환경변수의 키는 계속 사용됩니다."
+            else:
+                return {"type": "output", "text": "JEV API 키 작업은 save 또는 clear입니다."}
+        except ValueError as e:
+            return {"type": "output", "text": str(e)}
+        except OSError:
+            return {"type": "output", "text": "JEV API 키 파일을 변경할 수 없습니다. 저장 경로와 권한을 확인하세요."}
+        self.orch.emit_status()
+        return {"type": "output", "text": text, "state": self.state()}
+
+    async def _jev_test(self) -> dict:
+        if self.jev_test_lock.locked():
+            return {"type": "output", "text": "JEV 연결 확인이 이미 진행 중입니다."}
+        async with self.jev_test_lock:
+            key = get_api_key(self.cfg)
+            if not key:
+                return {"type": "output", "text": "먼저 JEV API 키를 저장하거나 TYPESAFE_API_KEY를 설정하세요."}
+            from ..core.jev import JevClient
+            client = JevClient(key, model=self.cfg.settings["jev_model"],
+                               timeout_sec=self.cfg.settings["jev_timeout_sec"])
+            try:
+                result = await client.test_connection()
+            except Exception:
+                # Third-party/network exception messages must never expose credentials.
+                result = {"ok": False, "message": "연결 확인에 실패했습니다. 키·네트워크·모델 설정을 확인하세요."}
+            return {"type": "output", "text": "JEV: " + result["message"],
+                    "jev_test": {"ok": bool(result["ok"])}, "state": self.state()}
+
     def _read_file(self, rel: str) -> dict:
         """대화·작업 기록·계획·기억 파일만 읽기 전용으로 보여준다."""
         allowed = ("DIALOGUE.md", "docs/", ".duet/memory/", ".duet/asks/", ".duet/reports/")
@@ -387,6 +445,11 @@ class WebUI:
             return {"type": "file", "path": rel, "error": "열 수 없는 경로입니다."}
         path = self.cfg.project / rel
         try:
+            parent = self.cfg.project
+            for part in Path(rel).parts:
+                parent = parent / part
+                if is_link(parent):
+                    return {"type": "file", "path": rel, "error": "심볼릭 링크 파일은 열 수 없습니다."}
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             return {"type": "file", "path": rel, "error": str(e)}

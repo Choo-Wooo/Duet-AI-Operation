@@ -261,6 +261,16 @@ td button { white-space: nowrap; margin-bottom: 4px; }
               정해 둔 예산 한도는 지킵니다. 막는 목록은 <code>.duet/policy.yaml</code> 의 <code>autopilot_deny</code> 에서 바꿀 수 있습니다.
               대화 모드와 상관없이 적용되며, <code>autopilot</code> 모드를 고른 경우에도 켜집니다.</div></div>
           <div class="card" id="designQuestionCard" hidden><h4>설계 질문</h4><div class="help" id="designQuestionState"></div><pre id="designQuestionText" style="white-space:pre-wrap"></pre><div class="help">아래 메시지 입력란에서 번호별로 답변하세요. 관련 작업은 답변을 기다립니다.</div></div>
+          <div class="card" id="jevCard"><h4>JEV 오케스트레이션 관제</h4>
+            <div class="help">작업 상태와 선택지를 TypeSafe API에 보내 자동 선택, 승인 검토, 정체·인계를 판단합니다. 관찰 모드는 판단만 기록하고, 적용 모드는 다음 판단부터 실행에 반영합니다. 보호 정책과 필수 검증은 계속 적용됩니다.</div>
+            <div class="grid2" id="jevSettings" style="margin-top:12px"></div>
+            <div class="row"><label for="jevApiKey">API 키</label><input id="jevApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="새 키 입력 (저장된 키는 표시하지 않음)" style="flex:1;min-width:180px">
+              <button id="jevKeySave">키 저장</button><button id="jevKeyClear" class="danger">저장 키 삭제</button><button id="jevTest">연결 확인</button></div>
+            <div id="jevKeyState" class="help" role="status"></div>
+            <div id="jevUsage" class="help" role="status" style="margin-top:8px"></div>
+            <div id="jevLast" class="help"></div>
+            <div class="help">키는 이 프로젝트의 비공개 파일에 별도 저장하며 세션 저장본에는 포함하지 않습니다. 저장 키가 없으면 <code>TYPESAFE_API_KEY</code> 환경변수를 사용합니다. 연결 확인은 작은 API 요청 1회를 보냅니다.</div>
+          </div>
           <div class="card"><h4>진행 설정</h4><div class="grid2" id="settings"></div></div>
           <div class="card"><h4>시작 안내</h4><pre id="startup" class="dim"></pre></div>
         </div></div>
@@ -408,7 +418,7 @@ const short = (s, n=400) => { s = String(s || ""); return s.length > n ? s.slice
 let filter = null;
 const knownRoles = new Set();
 
-function send(obj) { obj.rid = ++rid; if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+function send(obj) { obj.rid = ++rid; if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; } return false; }
 function toast(text) { if (!text) return; const t = $("#toast"); t.textContent = text; t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), 6000); }
 
 function connect() {
@@ -452,6 +462,7 @@ function setState(st) {
 
 function renderStatus(s) {
   if (!S) return; S.status = s;
+  renderJevStatus(s.jev);
   activityNow=DuetActivity.clock(s.server_now == null ? Date.now()/1000 : s.server_now,performance.now()/1000);
   const run = s.running || (s.busy ? "진행 중" : null);
   $("#rundot").className = "dot" + (s.paused ? " pause" : run ? " run" : "");
@@ -758,6 +769,20 @@ function renderModels() {
 }
 
 // ---------------- 설정·세션 ----------------
+function renderJevStatus(v) {
+  if (!S) return;
+  v = v || {};
+  if (v.mode && S.settings) S.settings.jev_mode = v.mode;
+  const modeInput = $('#jevSettings [data-k="jev_mode"]');
+  if (modeInput && v.mode) modeInput.value = v.mode;
+  const credential = v.source ? v : S.jev || {configured: false, source: "none"};
+  $("#jevKeyState").textContent = ({saved: "API 키: 저장됨", environment: "API 키: TYPESAFE_API_KEY 환경변수 사용", none: "API 키: 미설정", unavailable: "API 키: 저장 파일을 읽을 수 없음"})[credential.source] + (S.settings.jev_mode !== "off" && !credential.configured ? " · 키를 설정할 때까지 기존 절차로 동작합니다." : "");
+  $("#jevKeyClear").disabled = !["saved", "unavailable"].includes(credential.source);
+  $("#jevUsage").textContent = `이번 실행: ${(v.calls || 0).toLocaleString()}회 판단 · 입력 ${(v.input_tokens || 0).toLocaleString()} / 출력 ${(v.output_tokens || 0).toLocaleString()} 토큰 · 예상 $${Number(v.estimated_cost_usd || 0).toFixed(6)} · 오류 복귀 ${(v.fallbacks || 0).toLocaleString()}회`;
+  const last = v.last;
+  const purposes = {choice: "자동 선택", approval: "승인 판단", approval_confirm: "승인 재확인", flow: "정체 판단", handoff: "인계 판단", idle: "응답 대기 판단"};
+  $("#jevLast").textContent = last ? `최근: ${purposes[last.purpose] || last.purpose} · ${last.mode === "shadow" ? "관찰" : "적용"} · ${last.error ? "오류: " + last.error : "판단 완료"}` : "아직 JEV 관제 판단이 없습니다. 연결 확인 사용량은 위 집계에 포함하지 않습니다.";
+}
 function renderSettings() {
   const box = $("#settings"); if (!S) return;
   const fa = !!S.settings.full_auto, active = !!(S.status && S.status.full_auto);
@@ -768,7 +793,19 @@ function renderSettings() {
     if (e.target.checked && !confirm("전권 자동 수락을 켤까요?\n일반 승인·선택을 자동 처리합니다. 설계 질문 모드를 켜면 중요 설계 질문은 직접 답변을 받습니다. git push·sudo·시스템 삭제·배포만 막습니다.")) { e.target.checked = false; return; }
     send({type: "setting", key: "full_auto", value: e.target.checked});
   };
-  box.innerHTML = Object.entries(S.settings).filter(([k]) => k !== "full_auto").map(([k, v]) => {
+  const jevLabels = {jev_mode: "JEV 사용 모드", jev_model: "모델", jev_timeout_sec: "대기 한도 (초)", jev_confidence_threshold: "판단 확신 기준", jev_choices: "자동 선택", jev_approvals: "승인 판단", jev_flow: "정체·응답 대기·인계 판단"};
+  $("#jevSettings").innerHTML = Object.entries(S.settings).filter(([k]) => k.startsWith("jev_")).map(([k, v]) => {
+    const input = k === "jev_mode" ? `<select data-k="${k}">${[["off", "끔"], ["shadow", "관찰 (판단 기록만)"], ["on", "적용"]].map(([value, label]) => `<option value="${value}" ${v === value ? "selected" : ""}>${label}</option>`).join("")}</select>` :
+      typeof v === "boolean" ? `<input type="checkbox" data-k="${k}" ${v ? "checked" : ""}>` :
+      typeof v === "number" ? `<input type="number" data-k="${k}" value="${v}" ${k === "jev_confidence_threshold" ? 'min="0" max="1" step="0.01"' : 'min="1" max="60" step="1"'}>` : `<input type="text" data-k="${k}" value="${esc(v ?? "")}" style="width:100%">`;
+    return `<label>${jevLabels[k] || esc(k)}</label><div>${input}<div class="help">${esc(S.settings_help[k] || "")}</div></div>`;
+  }).join("");
+  renderJevStatus(S.status && S.status.jev);
+  $("#jevKeySave").onclick = () => { const input = $("#jevApiKey"); const key = input.value.trim(); if (!key) { toast("API 키를 입력하세요."); return; } if (send({type: "jev_key", action: "save", key})) input.value = ""; else toast("서버에 연결된 뒤 다시 저장하세요."); };
+  $("#jevKeyClear").onclick = () => send({type: "jev_key", action: "clear"});
+  $("#jevTest").onclick = () => { toast("JEV 연결을 확인합니다…"); send({type: "jev_test"}); };
+  $("#jevSettings").querySelectorAll("[data-k]").forEach(el => el.onchange = () => send({type: "setting", key: el.dataset.k, value: el.type === "checkbox" ? el.checked : el.value}));
+  box.innerHTML = Object.entries(S.settings).filter(([k]) => k !== "full_auto" && !k.startsWith("jev_")).map(([k, v]) => {
     const input = k === "verification_level" ? `<select data-k="${k}">${[["functional", "핵심 기능 검증 (기본)"], ["balanced", "균형 검증"], ["thorough", "전체 검증 (꼼꼼하게)"]].map(([value, label]) => `<option value="${value}" ${v === value ? "selected" : ""}>${label}</option>`).join("")}</select>` :
       typeof v === "boolean" ? `<input type="checkbox" data-k="${k}" ${v ? "checked" : ""}>` :
       typeof v === "number" ? `<input type="number" data-k="${k}" value="${v}">` : `<input type="text" data-k="${k}" value="${esc(v ?? "")}" style="width:100%">`;

@@ -24,6 +24,7 @@ from .textutil import extract_memory, save_memory, summarize_paths
 from .ui import HumanUI
 from .saves import delete_save, git_head, list_saves, read_save, write_save
 from .work import REPORT_TRIGGER, WORK_BLOCK, WorkBoard, parse_work_block
+from .jev_control import JevControl
 
 _ACCEPT_DIRECTIVE = re.compile(r"<!--\s*duet:\s*ACCEPT\b[^>]*?-->", re.I)
 
@@ -75,6 +76,13 @@ class AutopilotUI:
             pick = next((k for k in keys if k in self.STOP), keys[-1])
         else:
             pick = next((k for p in self.PREFER for k in keys if k == p), keys[0])
+            jev_pick = await self.orch.jev.choose(title, body, options, repeat=self.counts[key])
+            if not self.orch.full_auto:
+                return await self.real.ask_choice(title, body, options)
+            if self.orch.stop_requested:
+                return next((k for k in keys if k in self.STOP), keys[-1])
+            if jev_pick in keys:
+                pick = jev_pick
         label = dict(options).get(pick, pick)
         self.orch.notice(f"[전권 자동] {title} → {label}", "warn")
         return pick
@@ -148,6 +156,7 @@ class Orchestrator:
         self.usage = UsageWait(self)
         self.design = DesignQuestions(self)
         self.work = WorkBoard(self)
+        self.jev = JevControl(self)
         bus.subscribe(self._on_event)
         for warning in cfg.load_warnings:
             self.notice(warning, 'warn')
@@ -192,7 +201,13 @@ class Orchestrator:
     async def run_agent_turn(self, ad, prompt):
         from .verification import verification_guide
         prompt += "\n" + verification_guide(self.cfg.settings)
-        return await self.usage.run(ad, prompt)
+        watcher = asyncio.create_task(self.jev.watch(ad)) if self.jev.enabled("flow") else None
+        try:
+            return await self.usage.run(ad, prompt)
+        finally:
+            if watcher:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
 
     def set_verification_level(self, level: str) -> str:
         from .verification import VERIFICATION_LEVELS
@@ -205,6 +220,7 @@ class Orchestrator:
 
     # ================= 상태 =================
     def _on_event(self, ev: Event) -> None:
+        self.jev.record_event(ev)
         if ev.kind == "usage":
             self.cost_usd += float(ev.data.get("cost_usd") or 0)
             self.tokens += int(ev.data.get("tokens") or 0)
@@ -284,6 +300,7 @@ class Orchestrator:
             "max_turns": None if mt is None else mt + self.extra_turns,
             "mode": self.cfg.state.mode,
             "full_auto": self.full_auto,
+            "jev": self.jev.status(),
             "usage_limit_retry": self.usage.enabled,
             "usage_waits": list(self.usage.waits.values()),
             "design_questions": self.design.enabled,
@@ -482,10 +499,35 @@ class Orchestrator:
             policy = self.policy
             self.policy.task = self.cfg.state.task
         tier, reason = policy.classify(req, role)
+        original_tier = tier
         if self.full_auto and tier in (ARCHITECT, HUMAN):
             tier, reason = policy.autopilot(req)
         opinion = None
-        if tier == AUTO:
+        jev_decision = None
+        # Explicit DENY/HUMAN policy remains authoritative. In full-auto mode the
+        # user has delegated the latter, but autopilot's hard denials still win.
+        eligible = tier == ARCHITECT or (self.full_auto and tier == AUTO and original_tier in (ARCHITECT, HUMAN))
+        if eligible and self.jev.enabled("approvals"):
+            request_before = (req.cache_key(), json.dumps(req.detail, sort_keys=True, default=str))
+            jev_decision = await self.jev.approval(req, policy, reason)
+            # Recheck policy after the await: a user edit, pause or stop may have
+            # invalidated the state on which the model made its decision.
+            fresh_tier, fresh_reason = policy.classify(req, self.role_for(req.role))
+            if self.full_auto and fresh_tier in (ARCHITECT, HUMAN):
+                fresh_tier, fresh_reason = policy.autopilot(req)
+            if (self.jev._blocked() or not self.inbox.empty()
+                    or request_before != (req.cache_key(), json.dumps(req.detail, sort_keys=True, default=str))):
+                return Decision(False, "판단 중 작업 상태 또는 입력이 바뀌었습니다. 최신 지시를 반영한 뒤 다시 요청하세요.", by="policy")
+            if fresh_tier != tier:
+                jev_decision = None
+                tier, reason = fresh_tier, fresh_reason
+            elif jev_decision is None and self.jev.mode == "on" and tier == AUTO:
+                # Uncertain model judgment needs the existing architect review,
+                # not unconditional approval from autopilot's broad allow rule.
+                tier = ARCHITECT
+        if jev_decision is not None:
+            d = jev_decision
+        elif tier == AUTO:
             d = Decision(True, reason, by="auto")
         elif tier == DENY:
             d = Decision(False, reason, by="policy")
@@ -715,6 +757,7 @@ class Orchestrator:
         self.extra_turns = 0
         self.hashes = [self.git.code_hash()]
         self.task_history = []
+        self.jev.reset()
         final = False
         while nxt:
             await self.not_paused.wait()
@@ -768,6 +811,12 @@ class Orchestrator:
                 if c != "yes":
                     break
 
+            await self.not_paused.wait()
+            if self.stop_requested:
+                break
+            if not self.inbox.empty():
+                nxt = self._drain_inbox(nxt)
+                continue
             res = await self._turn(role, kind, info)
             if res is None:
                 break
@@ -779,6 +828,16 @@ class Orchestrator:
 
             negotiating = self.cfg.state.task and self.cfg.state.task["phase"] in ("plan", "plan_review")
             problem = None if negotiating else self._check_flow(role)
+            report = turn.directive("REPORT")
+            if (not negotiating and tr.ok and not tr.interrupted and not self.stop_requested
+                    and turn.directive("ASK_HUMAN") is None
+                    and (not self.cfg.state.task or (self.cfg.state.task["phase"] == "implement"
+                         and not self.cfg.state.task["waiting"] and report is None))):
+                assessment = await self.jev.flow(role, problem)
+                if assessment == "continue":
+                    problem = None
+                elif assessment == "replan":
+                    problem = "JEV가 최근 턴에서 반복 실패 또는 해결되지 않은 선행 조건을 감지했습니다."
             if problem and not self.stop_requested:
                 c = await self.ui.ask_choice("흐름이 막힌 것 같습니다", problem,
                                              [("continue", "계속 진행"), ("summarize", "설계자에게 정리 요청"),
@@ -788,6 +847,12 @@ class Orchestrator:
                 if c == "stop":
                     break
                 if c == "summarize":
+                    if self.cfg.state.task and self.cfg.state.task["phase"] in ("plan", "implement"):
+                        self._wait_task(problem)
+                        nxt = (self.cfg.main, "system", f"[관제 재계획 요청] {problem}\n"
+                               "최근 작업 기록에서 원인과 다른 접근을 정리하세요. 기존 범위에서 가능하면 구체적인 지침과 RESUME, "
+                               "범위 변경이 필요하면 CANCEL 사유를 내고 새로운 계획을 수립하세요.")
+                        continue
                     nxt = (self.cfg.main, "system",
                            f"오케스트레이터가 정체를 감지했습니다: {problem}\n막힌 지점과 원인, 다음에 시도할 방법을 정리하고 "
                            + ("다른 방법으로 다시 위임하거나, 더 진행할 수 없으면 정리하고 STATUS done 으로 마치세요."
@@ -1035,6 +1100,7 @@ class Orchestrator:
             self.dialogue.append_note(line)
         self.notes.clear()
         assert turn is not None
+        self.jev.record_turn(role_name, kind, full or turn.body, ok=tr.ok and not tr.interrupted)
         last = max(self.dialogue.max_number(), turn.n)
         self.cfg.state.last_n = last
         self.cfg.state.seen[role_name] = last
@@ -1150,6 +1216,13 @@ class Orchestrator:
             return (target, "delegate", task)
         if kind == "human":  # 사람이 /to 로 직접 말을 건 경우 → 답하면 사람에게
             return None
+        handoff = await self.jev.handoff(role, tr.full_text or tr.text or turn.body,
+                                         {"instruction": self.current_task.get(role, ""), "phase": "implement"})
+        if self.stop_requested or not self.inbox.empty():
+            return None
+        if handoff == "continue":
+            return (role, "system", "[JEV 관제] 보고에 아직 끝내지 않은 구현 항목이 있습니다. 기존 작업 범위 안에서 "
+                    "그 항목을 마치거나, 막힌 이유와 검증 결과를 명시해 메인에게 보고하세요.")
         return (main, "report", str(turn.n))
 
     # ================= 합의 기반 위임 =================
@@ -1336,6 +1409,12 @@ class Orchestrator:
         if phase == "implement" and role == worker and action == "REPORT":
             report = arg.split(maxsplit=1)[0:1]
             if report == ["done"]:
+                handoff = await self.jev.handoff(role, turn.body, task)
+                if self.stop_requested or not self.inbox.empty() or self.cfg.state.task is not task or task["waiting"]:
+                    return None
+                if handoff == "continue":
+                    return (worker, "implement", "[JEV 관제] 완료 보고에 명시된 미완료 항목을 기존 합의 범위 안에서 "
+                            "보완하세요. 수행할 수 없으면 REPORT blocked와 구체적인 사유를 보고하세요.")
                 self._phase("verify")
                 return (main, "verify", f"구현 완료 보고 #{turn.n}")
             if report == ["deviation"]:

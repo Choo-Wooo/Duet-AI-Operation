@@ -17,6 +17,7 @@ HELP = """명령어
   /usage-retry on|off       사용량 한도 자동 대기·재개 (기본 꺼짐)
   /design-questions on|off  설계 질문 모드 (초기 질문 묶음·사이클 끝 중요 질문)
   /autopilot on|off         전권 자동 수락 (승인·선택을 묻지 않음, push·sudo·시스템 삭제·배포만 막음)
+  /jev [off|shadow|on]      JEV 관제 끔 / 관찰 / 적용 (API 키는 웹 설정 또는 TYPESAFE_API_KEY)
   /role list                역할 목록
   /role add <이름> <claude|codex|agy> <모델> <설명…>
   /role edit <이름> <항목>=<값>   (cli, model, brief, permissions, effort, context_limit, max_sessions)
@@ -138,6 +139,18 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
         if rest in ("on", "off"):
             return orch.set_full_auto(rest == "on")
         return f"전권 자동 수락: {'켜짐' if orch.cfg.settings.get('full_auto') else '꺼짐'}  (사용법: /autopilot on|off)"
+    if cmd == "jev":
+        from .core.jev_settings import JEV_MODES, key_status
+        if rest and rest not in JEV_MODES:
+            return "사용법: /jev off|shadow|on — API 키는 메시지에 붙이지 말고 웹 설정 또는 TYPESAFE_API_KEY를 사용하세요."
+        if rest:
+            orch.cfg.settings["jev_mode"] = rest
+            orch.cfg.save_roles()
+            orch.emit_status()
+        mode = {"off": "끔", "shadow": "관찰 (판단 기록만)", "on": "적용"}[orch.cfg.settings["jev_mode"]]
+        credential = key_status(orch.cfg)
+        source = {"saved": "저장됨", "environment": "환경변수 사용", "none": "미설정", "unavailable": "파일 읽기 실패"}[credential["source"]]
+        return f"JEV 관제: {mode} · API 키: {source}. API 키는 웹 설정 또는 TYPESAFE_API_KEY에서 설정하세요."
     if cmd == "auto":
         if rest in ("on", "off"):
             return orch.set_auto(rest == "on")

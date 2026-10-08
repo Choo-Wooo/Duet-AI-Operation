@@ -85,7 +85,7 @@ def test_web_level_validation_and_persistence(tmp_path):
 def test_dropdown_sends_selected_level():
     html = (STATIC / "index.html").read_text()
     script = re.findall(r"<script>(.*?)</script>", html, re.S)[-1]
-    start = script.index("function renderSettings()")
+    start = script.index("function renderJevStatus(v)")  # renderSettings also renders the JEV status card
     end = script.index("function renderSaves()", start)
     node(r'''
 const assert=require('assert'),vm=require('vm');

@@ -17,7 +17,8 @@
     else if(age>=60) { label='응답 대기'; color='yellow'; icon='…'; }
     else { label='처리 중'; color='green'; icon=SPIN[elapsed%10]; }
     const shown=resting?null:elapsed;
-    const detail=a.detail?String(a.detail):null;
+    const health=a.jev_health_note?String(a.jev_health_note):null;
+    const detail=[a.detail?String(a.detail):null,health].filter(Boolean).join(' · ')||null;
     const text=label+(shown==null?'':` · ${shown}초`);
     const title=[text,!resting&&age>=60?`마지막 활동 ${age}초 전`:null,detail].filter(Boolean).join(' · ');
     return {icon,label,color,elapsed:shown,detail,title,text};

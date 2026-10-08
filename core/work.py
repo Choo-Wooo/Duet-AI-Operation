@@ -589,7 +589,8 @@ class WorkBoard:
 
     async def _approve(self, it: WorkItem, pol: Policy, req: ApprovalRequest) -> Decision:
         phase = it.status if it.status in ("plan", "plan_review") else "implement"
-        pol.task = {"phase": phase, "waiting": False, "test_command": it.test_command}
+        pol.task = {"phase": phase, "waiting": False, "test_command": it.test_command,
+                    "instruction": it.task, "agreed_files": it.agreed_files, "role": it.role}
         return await self.orch.handle_approval(req, policy=pol)
 
     async def _close(self, it: WorkItem) -> None:
@@ -623,6 +624,8 @@ class WorkBoard:
         self.orch.bus.emit("turn_end", ad.label, n=0, summary=(tr.text or "")[:200], directives=[], ok=tr.ok,
                            error=tr.error, interrupted=tr.interrupted)
         full = tr.full_text if tr.full_text is not None else tr.text
+        if jev := getattr(self.orch, "jev", None):
+            jev.record_turn(ad.label, kind, full or tr.error or "", ok=tr.ok and not tr.interrupted)
         self._thread(it, f"{who} · {kind}", full or f"(오류) {tr.error}")
         if not tr.ok:
             raise RuntimeError(tr.error or "턴 실패")
@@ -749,6 +752,7 @@ class WorkBoard:
 
     async def _implement_loop(self, it: WorkItem, path: Path) -> None:
         note = "계획이 합의되었습니다. 구현하세요."
+        jev_handoffs = 0
         if it.resume_at:
             note = "사람이 작업을 재개했습니다. 이어서 진행하세요."
         skip, it.resume_at = it.resume_at, ""
@@ -784,6 +788,25 @@ class WorkBoard:
                 if it.reworks > MAX_REWORK:
                     raise _Wait("implement", "보고 형식 오류 반복")
                 continue
+            jev = getattr(self.orch, "jev", None)
+            if jev and jev_handoffs < 2:
+                action = await jev.handoff(worker.label, full, {
+                    "id": it.id, "instruction": it.task, "phase": "implement",
+                    "agreed_files": it.agreed_files, "test_command": it.test_command,
+                })
+                if action == "continue":
+                    # This only requests a clearer/completed report. Acceptance,
+                    # agreed tests, and merge validation still belong to _verify.
+                    jev_handoffs += 1
+                    it.reworks += 1
+                    self.save()
+                    note = ("JEV 인계 판단: 완료 보고에 아직 끝내지 않은 구현 작업이 명시되어 있습니다. "
+                            "남은 항목을 수행한 뒤 실제 변경·검증 결과와 REPORT done을 다시 보고하세요. "
+                            "막혀 있으면 REPORT blocked <이유>를 쓰세요.")
+                    self._thread(it, "duet · JEV", note)
+                    if it.reworks > MAX_REWORK:
+                        raise _Wait("implement", "미완료 보고 보완 한도")
+                    continue
             if self.wt.in_merge(path):
                 try:
                     await asyncio.to_thread(self.wt.finish_merge, path)

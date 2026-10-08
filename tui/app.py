@@ -34,6 +34,7 @@ def activity_label(a: dict, now: float) -> tuple[str, str]:
     else: text, color = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[elapsed % 10] + ' 처리 중', 'green'
     if state not in ('idle', 'done', 'error'): text += f' · {elapsed}초'
     if a.get('detail'): text += ' · ' + a['detail']
+    if a.get('jev_health_note'): text += ' · ' + str(a['jev_health_note'])
     return text, color
 
 
