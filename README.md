@@ -371,6 +371,8 @@ JEV를 켜는 것과 전권 자동은 별개임. `confidence ≥ 0.8`은 판단 
 
 설정 카드에서 호출 수·토큰·추정 비용을 확인할 수 있고, JEV의 추정 비용은 Duet의 실행 예산에도 합산함. `/jev off|shadow|on`으로 모드 변경 가능. 질문 예시, 판단 이벤트와 실 API 평가 방법은 [JEV 관제 안내](docs/jev.md) 참고.
 
+판단별 질문·선택지·선택한 답·확신값은 **`.duet/logs/jev/DIALOGUE.md` 하나에 대화처럼 이어서 기록**함. 판단 ID로 후속 적용 결과를 연결하며, 기존 개별 기록도 시간순으로 통합함. 웹 **문서** 탭에서는 큰 로그의 최근 부분을 표시하고 전체 기록은 파일에 보존함.
+
 ## 화면 안내
 
 ### 웹 UI
@@ -619,6 +621,7 @@ duet/                      이 도구 (프로젝트에 복사)
 .duet/memory/<역할>.md      역할별 작업 기억
 .duet/saves/<이름>/         저장한 세션
 .duet/logs/*.jsonl         전체 이벤트 로그
+.duet/logs/jev/DIALOGUE.md JEV 질문·선택지·답변·적용 결과 누적 기록
 .duet/worktrees/<id>/      병렬 작업 워크트리 (병합 후 삭제)
 DIALOGUE.md                에이전트 공유 대화 문서
 docs/plans/, docs/work/    합의 계획서, 병렬 작업 기록

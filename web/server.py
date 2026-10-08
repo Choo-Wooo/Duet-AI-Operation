@@ -439,7 +439,7 @@ class WebUI:
 
     def _read_file(self, rel: str) -> dict:
         """대화·작업 기록·계획·기억 파일만 읽기 전용으로 보여준다."""
-        allowed = ("DIALOGUE.md", "docs/", ".duet/memory/", ".duet/asks/", ".duet/reports/")
+        allowed = ("DIALOGUE.md", "docs/", ".duet/memory/", ".duet/asks/", ".duet/reports/", ".duet/logs/jev/")
         rel = rel.lstrip("/")
         if not rel.startswith(allowed) or ".." in Path(rel).parts:
             return {"type": "file", "path": rel, "error": "열 수 없는 경로입니다."}
@@ -450,8 +450,10 @@ class WebUI:
                 parent = parent / part
                 if is_link(parent):
                     return {"type": "file", "path": rel, "error": "심볼릭 링크 파일은 열 수 없습니다."}
+            if rel == JEV_DIALOGUE_PATH:
+                return {"type": "file", "path": rel, "text": _read_doc(self.cfg.project, rel)["content"]}
             text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
+        except (OSError, ValueError) as e:
             return {"type": "file", "path": rel, "error": str(e)}
         if len(text) > 400_000:
             text = "… (앞부분 생략)\n" + text[-400_000:]
@@ -524,6 +526,8 @@ def _has(cli: str) -> bool:
 
 # ---------------------------------------------------------------- aiohttp 앱
 DOC_LIMIT = 1024 * 1024
+JEV_DIALOGUE_PATH = '.duet/logs/jev/DIALOGUE.md'
+JEV_ENTRY_MARKER = b'<!-- duet-jev-entry -->\n'
 
 
 def _doc_visible(parts: tuple[str, ...]) -> bool:
@@ -531,9 +535,12 @@ def _doc_visible(parts: tuple[str, ...]) -> bool:
         return False
     directories = parts[:-1]
     if parts[0] == '.duet':
-        if len(parts) < 3 or parts[1] != 'memory':
+        if len(parts) >= 4 and parts[1:3] == ('logs', 'jev'):
+            directories = parts[3:-1]
+        elif len(parts) >= 3 and parts[1] == 'memory':
+            directories = parts[2:-1]
+        else:
             return False
-        directories = parts[2:-1]
     return not any(p.startswith('.') or p in ('node_modules', 'duet') for p in directories)
 
 
@@ -554,7 +561,8 @@ def _doc_path(root: Path, raw: str) -> Path:
         raise ValueError('제외된 문서')
     if not target.is_file():
         raise FileNotFoundError(raw)
-    if target.stat().st_size > DOC_LIMIT:
+    cumulative_jev = raw == JEV_DIALOGUE_PATH and relative.as_posix() == JEV_DIALOGUE_PATH
+    if target.stat().st_size > DOC_LIMIT and not cumulative_jev:
         raise ValueError('문서 크기는 1MiB 이하이어야 합니다')
     return target
 
@@ -565,7 +573,8 @@ def _docs(root: Path) -> list[dict]:
     for base, dirs, files in os.walk(root, followlinks=False):
         rel = Path(base).relative_to(root)
         dirs[:] = [d for d in dirs if not is_link(Path(base)/d) and
-                   (_doc_visible((rel/d/'file.md').parts) or (rel == Path('.') and d == '.duet'))]
+                   (_doc_visible((rel/d/'file.md').parts) or (rel == Path('.') and d == '.duet')
+                    or (rel == Path('.duet') and d == 'logs'))]
         for name in files:
             raw = (rel/name).as_posix()
             try:
@@ -577,6 +586,31 @@ def _docs(root: Path) -> list[dict]:
             if len(rows) < 2000: heapq.heappush(rows, row)
             elif row > rows[0]: heapq.heapreplace(rows, row)
     return [dict(path=p, size=s, mtime=m) for m, p, s in sorted(rows, reverse=True)]
+
+
+def _read_doc(root: Path, raw: str) -> dict:
+    path = _doc_path(root, raw)
+    with path.open('rb') as f:
+        stat = os.fstat(f.fileno())
+        if raw == JEV_DIALOGUE_PATH and stat.st_size > DOC_LIMIT:
+            f.seek(stat.st_size - DOC_LIMIT)
+            content = f.read(DOC_LIMIT)
+            marker = content.find(JEV_ENTRY_MARKER)
+            notice = '> 오래된 앞부분을 생략하고 최근 최대 1MiB만 표시합니다. 전체 기록은 프로젝트의 `.duet/logs/jev/DIALOGUE.md`에 보존됩니다.\n\n'
+            if marker >= 0:
+                text = content[marker:].decode('utf-8')
+            else:
+                # A single large entry can fill the entire tail. Show it as
+                # literal text so a partial Markdown fence cannot leak out.
+                while content and 0x80 <= content[0] <= 0xBF:
+                    content = content[1:]
+                from ..core.jev_log import block
+                text = block(content.decode('utf-8'))
+            return dict(path=raw, content=notice + text, mtime=stat.st_mtime)
+        content = f.read(DOC_LIMIT + 1)
+    if len(content) > DOC_LIMIT:
+        raise ValueError('문서 크기 초과')
+    return dict(path=raw, content=content.decode('utf-8'), mtime=stat.st_mtime)
 
 
 def build_app(ui: WebUI) -> web.Application:
@@ -608,16 +642,8 @@ def build_app(ui: WebUI) -> web.Application:
         if request.path == '/api/docs':
             return web.json_response(await asyncio.to_thread(_docs, ui.cfg.project))
         raw = request.query.get('path', '')
-        def read():
-            path = _doc_path(ui.cfg.project, raw)
-            with path.open('rb') as f:
-                content = f.read(DOC_LIMIT + 1)
-                mtime = os.fstat(f.fileno()).st_mtime
-            if len(content) > DOC_LIMIT:
-                raise ValueError('문서 크기 초과')
-            return dict(path=raw, content=content.decode('utf-8'), mtime=mtime)
         try:
-            return web.json_response(await asyncio.to_thread(read))
+            return web.json_response(await asyncio.to_thread(_read_doc, ui.cfg.project, raw))
         except FileNotFoundError:
             return web.json_response({'error': '문서가 없습니다'}, status=404)
         except (ValueError, OSError, RuntimeError) as e:

@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from contextvars import ContextVar
 import hashlib
 import json
 import re
 import time
 
 from .jev import JevClient
+from .jev_log import append_outcome, migrate_legacy, write_decision
 from .jev_settings import JEV_DEFAULTS, get_api_key, key_status
 from .policy import Decision
 
@@ -58,6 +60,12 @@ class JevControl:
         self._slots = asyncio.Semaphore(2)
         self._handoff_returns = {}
         self.client_factory = JevClient
+        self._log_entry = ContextVar("jev_log_entry", default=None)
+        self._log_warning = False
+        try:
+            migrate_legacy(orch.cfg.project)
+        except OSError:
+            self._warn_log()
 
     @property
     def mode(self):
@@ -161,12 +169,26 @@ class JevControl:
                            applied=bool(applied), mode=self.mode, rubric_version=RUBRIC_VERSION)
         if action and applied:
             self.orch.notice(f"[JEV 관제] {purpose} → {action}")
+        if self._log_entry.get():
+            try:
+                append_outcome(self._log_entry.get(), {"종류": purpose, "행동": action,
+                                                      "관제 적용": bool(applied), "모드": self.mode})
+            except OSError:
+                self._warn_log()
+
+    def _warn_log(self):
+        if not self._log_warning:
+            self._log_warning = True
+            self.orch.notice("JEV 판단 Markdown 로그를 저장할 수 없습니다. .duet/logs/jev 경로와 권한을 확인하세요.", "warn")
 
     async def _evaluate(self, purpose, state, questions):
+        self._log_entry.set(None)
         if self.mode == "off" or self._blocked():
             return None
         cfg = self.orch.cfg
         mode = self.mode
+        threshold = self.confidence_threshold
+        requested_model = cfg.settings.get("jev_model", "jev-1.13.0")
         key = get_api_key(cfg)
         config_id = (hashlib.sha256((key or "").encode()).digest(), cfg.settings.get("jev_model"),
                      cfg.settings.get("jev_timeout_sec"), mode)
@@ -205,8 +227,15 @@ class JevControl:
         if not result.ok:
             self.orch.notice(f"JEV {purpose}: {result.error} — 기존 판단 경로를 사용합니다.", "warn")
         self.orch.emit_status()
-        if (self._blocked() or self._revision() != revision or not self.orch.inbox.empty()
-                or get_api_key(cfg) != key):
+        stale = (self._blocked() or self._revision() != revision or not self.orch.inbox.empty()
+                 or get_api_key(cfg) != key)
+        record = {**self.last, "requested_model": requested_model, "threshold": threshold,
+                  "output_tokens": result.output_tokens, "questions": questions, "stale": stale}
+        try:
+            self._log_entry.set(write_decision(cfg.project, self._redact(record, key)))
+        except OSError:
+            self._warn_log()
+        if stale:
             return None
         return result
 
