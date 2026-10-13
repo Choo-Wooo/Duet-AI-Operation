@@ -1,0 +1,160 @@
+/* A phone-sized control surface over the same live state and actions. */
+.mobile-only { display: none; }
+#mobileMoreDialog { color: var(--text); background: var(--panel); border: 1px solid var(--line); padding: 0; }
+#mobileMoreDialog::backdrop { background: rgba(0, 0, 0, .5); }
+
+@media (max-width: 860px) {
+  :root { --mobile-nav-h: calc(58px + env(safe-area-inset-bottom, 0px)); }
+  html, body { overflow: hidden; width: 100%; overscroll-behavior: none; }
+  body { font-size: 14px; }
+  button, input, select, textarea { touch-action: manipulation; }
+  button { min-height: 44px; }
+  input:not([type=checkbox]):not([type=radio]), select, textarea { font-size: 16px; min-height: 44px; min-width: 0; max-width: 100%; }
+  input[type=checkbox], input[type=radio] { width: 20px; height: 20px; flex: none; }
+  label:has(> input[type=checkbox]), label:has(> input[type=radio]) { min-height: 44px; display: inline-flex; align-items: center; gap: 8px; }
+  .switch { min-height: 24px !important; width: 44px; }
+  .switch input { width: 0; height: 0; }
+  .app { position: fixed; left: 0; right: 0; top: var(--mobile-viewport-top, 0px); width: 100%; height: 100dvh; height: var(--mobile-viewport-h, 100dvh); grid-template-rows: auto minmax(0, 1fr) auto; }
+  .app > header { display: grid; grid-template-columns: minmax(0, 1fr) 84px 106px; gap: 6px; height: auto; padding: calc(6px + env(safe-area-inset-top, 0px)) max(10px, env(safe-area-inset-right, 0px)) 8px max(10px, env(safe-area-inset-left, 0px)); overflow: hidden; }
+  .app > header .brand { grid-area: 1 / 1; font-size: 17px; line-height: 28px; }
+  .app > header #conn { grid-area: 1 / 1; justify-self: end; min-width: 0; font-size: 11px; }
+  .app > header #runchip { grid-area: 1 / 2 / 2 / 4; width: 100%; max-width: none; justify-content: flex-end; background: transparent; border: 0; padding: 0; }
+  #runtxt { max-width: 100%; }
+  .app > header > .grow, .app > header #conversationMode, .app > header #designQuestionsBadge, .app > header #autopilot { display: none; }
+  .app > header #btnWorkflow { grid-area: 2 / 1; border-radius: 8px; padding: 4px 6px; min-width: 0; min-height: 44px; justify-content: center; font-size: 12px; }
+  .app > header #btnPause { grid-area: 2 / 2; padding: 4px 6px; }
+  .app > header #btnStop { grid-area: 2 / 3; padding: 4px 6px; font-size: 12px; }
+  .app > header #pendingBadge { grid-area: 3 / 1 / 4 / 4; justify-content: center; min-height: 36px; border-color: var(--warn); color: var(--warn); }
+  .app > header #pendingBadge.zero { display: none; }
+  .body { display: flex; min-height: 0; min-width: 0; overflow: hidden; }
+  .body > #nav { display: none; }
+  main { flex: 1; overflow: hidden; }
+  .view, .view.on { overflow: hidden; }
+  #mobileNav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; height: var(--mobile-nav-h); padding: 3px max(8px, env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px) max(8px, env(safe-area-inset-left, 0px)); border-top: 1px solid var(--line); background: var(--panel); }
+  #mobileNav button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; background: none; border: 0; border-radius: 9px; min-width: 0; padding: 2px; font-size: 11px; color: var(--dim); }
+  #mobileNav button > span[aria-hidden] { font-size: 20px; line-height: 24px; }
+  #mobileNav button[aria-current=page] { background: var(--panel2); color: var(--accent); font-weight: 700; }
+  #mobileLiveTabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; flex: none; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  #mobileLiveTabs button { background: transparent; color: var(--dim); border-color: transparent; border-radius: 8px; }
+  #mobileLiveTabs button[aria-selected=true] { background: var(--panel2); color: var(--accent); border-color: var(--line); font-weight: 600; }
+  .live { display: flex; min-height: 0; overflow: hidden; }
+  .live > .col { flex: 1; min-width: 0; border: 0; }
+  .live[data-mobile-panel=flow] #streamPanel, .live[data-mobile-panel=stream] #flowPanel { display: none; }
+  .colhead { padding: 6px 10px; flex: none; }
+  #flowPanel .colhead { justify-content: flex-end; }
+  #flowPanel .colhead > span, #streamPanel .colhead > .t { display: none; }
+  #flowPanel .colhead button { min-height: 36px; font-size: 12px; }
+  #streamPanel .colhead { overflow-x: auto; flex-wrap: nowrap; }
+  #filters { display: flex; gap: 4px; }
+  .filter { min-height: 44px; flex: none; }
+  .feed { padding: 10px; overscroll-behavior: contain; overflow-wrap: anywhere; }
+  .ev { grid-template-columns: minmax(0, 1fr); gap: 3px; border-bottom: 1px solid var(--line); padding: 4px 0 9px; }
+  .ev .who { justify-self: start; }
+  #activityRoles { height: 34px; min-height: 34px; padding: 0 10px; }
+  #activityRoles:empty { display: none; }
+  .achip { width: auto; max-width: 240px; }
+  #researchProgress { max-height: 24dvh; overflow: auto; padding: 8px 10px; font-size: 12px; flex: none; }
+  #usageWaitBanner { max-height: 20dvh; overflow: auto; flex: none; }
+  .composer { flex: none; padding: 8px 10px; gap: 6px; }
+  #composer { display: grid; grid-template-columns: minmax(0, 1fr) 76px; align-items: end; }
+  #target { grid-column: 1 / 3; width: 100%; min-height: 36px; height: 36px; font-size: 16px; }
+  #input { grid-column: 1; min-height: 48px; height: 48px; max-height: 120px; resize: none; }
+  #send { grid-column: 2; height: 48px; }
+  .composer textarea { min-width: 0; max-height: 140px; }
+  .keyboard-open { --mobile-nav-h: 0px; }
+  .keyboard-open #mobileNav { display: none; }
+  .keyboard-open #activityRoles, .keyboard-open #researchProgress, .keyboard-open #flowPanel .colhead { display: none; }
+  .keyboard-open .app > header { padding-top: 4px; }
+  .scroll { padding: 10px; overscroll-behavior: contain; }
+  .stack { gap: 10px; width: 100%; max-width: none; min-width: 0; }
+  .card { padding: 12px; min-width: 0; overflow-wrap: anywhere; }
+  .card .row { gap: 8px; }
+  .card .row > input:not([type=checkbox]), .card .row > select { flex: 1 1 100% !important; width: 100% !important; min-width: 0 !important; }
+  .grid2 { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .grid2 > label { padding-top: 10px; }
+  .grid2 > div { min-width: 0; }
+  .grid2 input:not([type=checkbox]), .grid2 select { width: 100%; }
+  .board { display: flex; flex-direction: column; padding: 10px; gap: 18px; }
+  .lane { min-width: 0; }
+  .wctop { flex-wrap: wrap; gap: 5px; }
+  .wcrow { overflow-wrap: anywhere; }
+  .boardbatch { padding: 4px 10px; height: auto; min-height: 32px; line-height: 24px; }
+  .role-table { overflow: visible; }
+  .role-table table, .role-table tbody, #v-sessions table, #saves { display: block; width: 100%; }
+  .role-table thead, #v-sessions thead { display: none; }
+  .role-table tr, #saves tr { display: block; margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel2); }
+  .role-table td, #saves td { display: block; border: 0; padding: 5px 0; min-width: 0; overflow-wrap: anywhere; }
+  .role-table td[data-label], #saves td[data-label] { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 6px; }
+  td[data-label]::before { content: attr(data-label); font: 12px/1.4 var(--sans); color: var(--dim); }
+  .role-table td input, .role-table td select { width: 100%; max-width: 100%; min-width: 0; }
+  .role-card-heading b { font-size: 15px; }
+  .role-card-heading .help { max-width: none !important; }
+  .role-card-actions:empty { display: none; }
+  #v-roles #modelsRefresh { float: none !important; display: block; margin: 8px 0; }
+  #v-ask .colhead > span:not(.t) { flex-basis: 100%; }
+  #askRole { flex: 1; margin-left: 0 !important; }
+  .doctoolbar { height: auto; min-height: 54px; padding: 6px 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
+  #docFilter { grid-column: 1 / 3; width: 100%; }
+  #docRefresh { grid-column: 3; grid-row: 1; }
+  #docExpand, #docCollapse { min-height: 36px; font-size: 12px; }
+  #docExpand { grid-column: 1; }
+  #docCollapse { grid-column: 2 / 4; }
+  #docPath { display: none; }
+  .docs-layout { display: flex; min-height: 0; }
+  #docList { flex: 1; border: 0; padding: 6px; }
+  #docList .trow { min-height: 44px; }
+  #docBody { display: none; flex: 1; min-width: 0; padding: 12px; }
+  #mobileDocBack { display: none; }
+  #v-docs.mobile-document-open #docList { display: none; }
+  #v-docs.mobile-document-open #docBody { display: block; }
+  #v-docs.mobile-document-open #mobileDocBack { display: block; grid-column: 1 / 3; grid-row: 1; text-align: left; }
+  #v-docs.mobile-document-open #docPath { display: block; grid-column: 1 / 4; width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  #v-docs.mobile-document-open #docFilter, #v-docs.mobile-document-open #docExpand, #v-docs.mobile-document-open #docCollapse { display: none; }
+  .md { font-size: 15px; }
+  .md pre { font-size: 12px; }
+  #pendingTray { right: 8px; width: auto; left: 8px; bottom: calc(var(--mobile-viewport-bottom, 0px) + var(--composer-h) + var(--mobile-nav-h) + 8px); max-width: none; max-height: max(50px, calc(var(--mobile-viewport-h, 100dvh) - var(--mobile-header-h, 100px) - var(--composer-h) - var(--mobile-nav-h) - 16px)); display: flex; flex-direction: column; }
+  #pendingTray.zero { display: none; }
+  .trayhead { min-height: 48px; height: auto; flex: none; }
+  #pending { max-height: none; min-height: 0; overscroll-behavior: contain; }
+  #pending .row > button { flex: 1 1 auto; }
+  #pending select, #pending input:not([type=checkbox]), #pending textarea { max-width: 100%; }
+  .modal { padding: 10px; top: var(--mobile-viewport-top, 0px); bottom: auto; height: var(--mobile-viewport-h, 100dvh); z-index: 30; }
+  .modal .box { max-height: 100%; min-width: 0; }
+  .modal .box header, #workflowDialog header, #mobileMoreDialog header { min-height: 56px; height: auto; flex-shrink: 0; gap: 8px; padding: 6px 12px; }
+  .modal .box header b { overflow: hidden; text-overflow: ellipsis; }
+  .modal .box .content { padding: 12px; overscroll-behavior: contain; }
+  #workflowDialog { max-height: calc(var(--mobile-viewport-h, 100dvh) - 24px); overflow-y: auto; width: calc(100vw - 24px); }
+  .workflow-options { grid-template-columns: 1fr; }
+  .workflow-option { min-height: 100px; }
+  #mobileMoreDialog { position: fixed; inset: auto 0 var(--mobile-viewport-bottom, 0px); width: 100%; max-width: 100%; max-height: calc(var(--mobile-viewport-h, 100dvh) - 24px); margin: 0; border-radius: 18px 18px 0 0; overflow: auto; padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .mobile-more-content { padding: 12px; }
+  .mobile-menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .mobile-menu-grid button { display: flex; flex-direction: column; text-align: left; gap: 6px; padding: 14px 12px; min-height: 84px; border-radius: 10px; }
+  .mobile-menu-grid button[aria-current=page] { border-color: var(--accent); }
+  #mobileSessionOptions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 16px; margin-top: 12px; border-top: 1px solid var(--line); }
+  #mobileSessionOptions #conversationMode { width: 100%; display: flex; border-radius: 8px; justify-content: space-between; gap: 8px; }
+  #mobileSessionOptions #conversationMode .mobile-only { display: inline; }
+  #mobileSessionOptions #mode { max-width: 60%; }
+  #mobileSessionOptions #autopilot { min-height: 44px; }
+  #mobileSessionOptions #ctx { width: 100%; }
+  .toast { top: calc(var(--mobile-viewport-top, 0px) + env(safe-area-inset-top, 0px) + 10px); left: 10px; right: 10px; width: auto; max-width: none; max-height: 40dvh; overflow: auto; z-index: 40; }
+  #authNotice { top: calc(var(--mobile-viewport-top, 0px) + env(safe-area-inset-top, 0px) + 10px); flex-direction: column; align-items: stretch; gap: 8px; max-height: calc(var(--mobile-viewport-h, 100dvh) - 24px); overflow: auto; }
+  .device-row { flex-wrap: wrap; }
+  .device-row > div { flex: 1 1 160px; }
+  /* The floating approval tray must not cover the final item in a scroll area. */
+  .feed, .scroll, .board, #docList, #docBody { padding-bottom: calc(12px + var(--mobile-tray-space, 0px)); }
+}
+
+@media (max-width: 360px) {
+  .role-table td[data-label] { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .mobile-menu-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 860px) and (max-height: 500px) {
+  :root { --mobile-nav-h: calc(48px + env(safe-area-inset-bottom, 0px)); }
+  .app > header .brand, .app > header #conn, .app > header #runchip, #activityRoles, #flowPanel .colhead { display: none; }
+  .app > header #btnWorkflow, .app > header #btnPause, .app > header #btnStop { grid-row: 1; }
+  #mobileLiveTabs { padding-top: 2px; padding-bottom: 2px; }
+  #researchProgress { max-height: 45px; }
+  .keyboard-open { --mobile-nav-h: 0px; }
+}

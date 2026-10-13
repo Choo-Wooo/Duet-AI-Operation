@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>duet</title>
 <style>
 :root {
@@ -131,6 +131,22 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 .conn { font-size: 12px; min-width: 48px; text-align: center; flex: none; }
 #runtxt { display: block; flex: 0 1 auto; min-width: 0; white-space: nowrap; max-width: 280px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 #btnPause { min-width: 84px; flex: none; }
+#btnWorkflow { color:var(--accent); border-color:var(--accent); min-height:28px; }
+#workflowDialog { color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:0; width:min(540px,calc(100vw - 32px)); }
+#workflowDialog::backdrop { background:rgba(0,0,0,.45); }
+#workflowDialog header { border-radius:12px 12px 0 0; }
+#workflowDialog .content { padding:16px; }
+.workflow-options { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:14px 0; }
+.workflow-option { text-align:left; white-space:normal; border-radius:10px; padding:14px; }
+.workflow-option b { display:block; margin-bottom:6px; }
+.workflow-option[aria-pressed="true"] { border-color:var(--accent); background:var(--panel2); }
+.workflow-option:disabled { opacity:.6; cursor:default; }
+.role-group.active { border-color:var(--accent); }
+.role-table { overflow-x:auto; }
+.role-group h4 .pill { margin-left:6px; color:var(--accent); }
+#researchProgress { padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
+#researchProgress .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+#researchGoal { margin-top:5px; white-space:pre-wrap; overflow-wrap:anywhere; }
 #btnStop { flex: none; }
 .pbadge { flex: none; }
 .pbadge.zero { opacity: .45; }
@@ -142,11 +158,18 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 .wc .row button:disabled { opacity: .4; cursor: default; }
 .conn.off { color: var(--bad); }
 @media (max-width: 860px) {
+  .app > header { gap:6px; padding:0 8px; }
+  .app > header #proj, .app > header #cost, .app > header #turns { display:none; }
   .body { grid-template-columns: minmax(0, 1fr); }
   nav { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--line); }
   nav .sep, nav .ctx { display: none; }
   .live { grid-template-columns: 1fr; }
   .board { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .app > header { height:auto; min-height:44px; flex-wrap:wrap; padding:6px 8px; }
+  .app > header #runchip { max-width:140px; }
+  .workflow-options { grid-template-columns:1fr; }
 }
 </style>
 </head>
@@ -156,7 +179,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
     <span class="brand">duet</span>
     <span class="proj" id="proj"></span>
     <span class="chip" id="runchip"><span class="dot" id="rundot"></span><span id="runtxt">대기</span></span>
-    <span class="chip" title="대화 모드"><select id="mode" style="border:none;background:none;padding:0"></select></span>
+    <span class="chip" id="conversationMode" title="대화 모드"><span class="mobile-only">대화 모드</span><select id="mode" aria-label="대화 모드" style="border:none;background:none;padding:0"></select></span>
     <span class="chip" id="designQuestionsBadge" hidden>설계 질문 모드</span>
     <span class="chip" id="autopilot" title="설정에서 끄기 · 전권 자동: 승인·선택을 묻지 않고 진행 (push·sudo·시스템 삭제·배포만 막음)" hidden style="color:var(--bad);border-color:var(--bad);cursor:pointer">전권 자동</span>
     <span class="chip" id="turns" title="이번 요청 턴 / 한도"></span>
@@ -164,6 +187,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
     <span class="grow"></span>
     <span class="chip pbadge zero" id="pendingBadge" title="승인 대기 개수">승인 <b id="pendingBadgeN">0</b></span>
     <span class="conn" id="conn" title="서버 연결 중">연결 중</span>
+    <button class="chip" id="btnWorkflow" aria-haspopup="dialog" aria-controls="workflowDialog" title="개발·연구 모드 선택">개발 모드 ▾</button>
     <button id="btnPause">일시정지</button>
     <button id="btnStop" class="danger">현재 턴 중단</button>
   </header>
@@ -183,13 +207,21 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 
       <section class="view on" id="v-live">
         <div id="usageWaitBanner" hidden class="help" style="padding:10px 14px;white-space:pre-wrap;color:var(--warn)"></div>
-        <div class="live">
-          <div class="col">
+        <div id="researchProgress" hidden aria-live="polite">
+          <div class="row"><b>연구 진행</b><span class="pill" id="researchPhase"></span><span class="help" id="researchAction"></span></div>
+          <div id="researchGoal"></div>
+        </div>
+        <div id="mobileLiveTabs" class="mobile-only" role="tablist" aria-label="진행 화면">
+          <button id="mobileFlowTab" type="button" role="tab" data-live-panel="flow" aria-controls="flowPanel" aria-selected="true">대화 흐름</button>
+          <button id="mobileStreamTab" type="button" role="tab" data-live-panel="stream" aria-controls="streamPanel" aria-selected="false" tabindex="-1">실시간 출력</button>
+        </div>
+        <div class="live" data-mobile-panel="flow">
+          <div class="col" id="flowPanel">
             <div class="colhead"><span class="t">대화 흐름</span><span>DIALOGUE.md · 결정·보고·단계</span>
               <span class="grow"></span><button id="openDialogue" style="margin-left:auto">문서 열기</button></div>
             <div class="feed" id="flow"></div>
           </div>
-          <div class="col">
+          <div class="col" id="streamPanel">
             <div class="colhead"><span class="t">실시간 출력</span><span id="filters"></span></div>
             <div class="feed" id="stream"></div>
           </div>
@@ -197,7 +229,7 @@ td button { white-space: nowrap; margin-bottom: 4px; }
       </section>
 
       <section class="view" id="v-docs">
-        <div class="doctoolbar" id="docToolbar"><input id="docFilter" placeholder="문서 경로 필터"><button id="docRefresh">새로고침</button><button id="docExpand" title="모든 폴더 펼치기">모두 펼치기</button><button id="docCollapse" title="모든 폴더 접기">모두 접기</button><span id="docPath"></span></div>
+        <div class="doctoolbar" id="docToolbar"><button id="mobileDocBack" class="mobile-only" type="button">‹ 문서 목록</button><input id="docFilter" aria-label="문서 경로 필터" placeholder="문서 경로 필터"><button id="docRefresh">새로고침</button><button id="docExpand" title="모든 폴더 펼치기">모두 펼치기</button><button id="docCollapse" title="모든 폴더 접기">모두 접기</button><span id="docPath"></span></div>
         <div class="docs-layout"><aside id="docList"></aside><article id="docBody">문서를 선택하세요.</article></div>
       </section>
       <section class="view" id="v-work">
@@ -231,10 +263,14 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 
       <section class="view" id="v-roles">
         <div class="scroll"><div class="stack">
-          <div class="card"><h4>역할</h4>
+          <div class="card role-group" id="developmentRolesCard"><h4>개발 모드 역할 <span class="pill" id="developmentRolesActive" hidden>선택됨</span></h4>
             <div class="help">모델 목록은 로그인된 각 CLI 에서 조회한 값입니다. 병렬 세션 수는 설계자가 역할별 최대치 안에서 정합니다.</div>
-            <table><thead><tr><th>역할</th><th>CLI</th><th>모델</th><th>effort</th><th>권한</th><th>병렬 최대</th><th>컨텍스트 한도</th><th></th></tr></thead>
-              <tbody id="roles"></tbody></table></div>
+            <div class="role-table"><table><thead><tr><th>역할</th><th>CLI</th><th>모델</th><th>effort</th><th>권한</th><th>병렬 최대</th><th>컨텍스트 한도</th><th></th></tr></thead>
+              <tbody id="roles"></tbody></table></div></div>
+          <div class="card role-group" id="researchRolesCard"><h4>연구 모드 역할 <span class="pill" id="researchRolesActive" hidden>선택됨</span></h4>
+            <div class="help">탐색자와 비판자는 동등한 토론자입니다. 탐색자는 새로운 해결안을, 비판자는 맹점과 검증을 우선하며 함께 해결안을 개선합니다. JEV는 다음 발언의 목적과 진행 복구를 관제합니다.</div>
+            <div class="role-table"><table><thead><tr><th>역할</th><th>CLI</th><th>모델</th><th>effort</th><th>권한</th><th>진행</th><th>컨텍스트 한도</th><th></th></tr></thead>
+              <tbody id="researchRoles"></tbody></table></div></div>
           <div class="card"><h4>역할 추가</h4>
             <div class="help">프리셋을 고르면 역할 설명·권한·모델·병렬 수와 역할 전용 도구가 채워집니다. 필요한 칸만 고쳐서 추가하세요.</div>
             <div class="row">
@@ -261,6 +297,11 @@ td button { white-space: nowrap; margin-bottom: 4px; }
               정해 둔 예산 한도는 지킵니다. 막는 목록은 <code>.duet/policy.yaml</code> 의 <code>autopilot_deny</code> 에서 바꿀 수 있습니다.
               대화 모드와 상관없이 적용되며, <code>autopilot</code> 모드를 고른 경우에도 켜집니다.</div></div>
           <div class="card" id="designQuestionCard" hidden><h4>설계 질문</h4><div class="help" id="designQuestionState"></div><pre id="designQuestionText" style="white-space:pre-wrap"></pre><div class="help">아래 메시지 입력란에서 번호별로 답변하세요. 관련 작업은 답변을 기다립니다.</div></div>
+          <div class="card" id="devicesCard"><h4>등록된 브라우저</h4>
+            <div class="help">토큰 주소로 접속한 브라우저는 180일 동안 이 Duet에 다시 접속할 수 있습니다. 같은 주소와 브라우저를 사용하세요. 쿠키를 삭제하거나 시크릿 창을 닫으면 다시 등록해야 합니다.</div>
+            <div class="row"><button id="devicesRefresh" type="button">목록 새로고침</button><button id="deviceForget" type="button" class="danger">이 브라우저 등록 해제</button></div>
+            <div id="devicesState" class="help" role="status"></div><div id="devicesList"></div>
+          </div>
           <div class="card" id="jevCard"><h4>JEV 오케스트레이션 관제</h4>
             <div class="help">작업 상태와 선택지를 TypeSafe API에 보내 자동 선택, 승인 검토, 정체·인계를 판단합니다. 관찰 모드는 판단만 기록하고, 적용 모드는 다음 판단부터 실행에 반영합니다. 보호 정책과 필수 검증은 계속 적용됩니다.</div>
             <div class="grid2" id="jevSettings" style="margin-top:12px"></div>
@@ -293,15 +334,46 @@ td button { white-space: nowrap; margin-bottom: 4px; }
       </div>
     </main>
   </div>
+  <div id="mobileNav" class="mobile-only" role="navigation" aria-label="모바일 메뉴">
+    <button type="button" data-mobile-view="live" aria-current="page"><span aria-hidden="true">◉</span>진행</button>
+    <button type="button" data-mobile-view="work"><span aria-hidden="true">▦</span>작업</button>
+    <button type="button" data-mobile-view="docs"><span aria-hidden="true">▤</span>문서</button>
+    <button type="button" id="mobileMoreButton" aria-haspopup="dialog" aria-controls="mobileMoreDialog"><span aria-hidden="true">•••</span><span id="mobileMoreLabel">더보기</span></button>
+  </div>
 </div>
 
+<dialog id="mobileMoreDialog" aria-labelledby="mobileMoreTitle">
+  <header><b id="mobileMoreTitle">더보기</b><span class="grow"></span><button id="mobileMoreClose" type="button" aria-label="더보기 닫기">닫기</button></header>
+  <div class="mobile-more-content">
+    <div class="mobile-menu-grid">
+      <button type="button" data-mobile-view="ask"><b>질문</b><span class="help">역할별 읽기 전용 대화</span></button>
+      <button type="button" data-mobile-view="sessions"><b>세션</b><span class="help">저장 및 불러오기</span></button>
+      <button type="button" data-mobile-view="roles"><b>역할·모델</b><span class="help">개발·연구 역할 설정</span></button>
+      <button type="button" data-mobile-view="settings"><b>설정</b><span class="help">자동 수락·JEV·접속 기기</span></button>
+    </div>
+    <div id="mobileSessionOptions" aria-label="현재 진행 설정"></div>
+  </div>
+</dialog>
 <div class="modal" id="modal"><div class="box"><header><b id="modalTitle"></b><span class="grow"></span><button id="modalClose">닫기</button></header>
   <div class="content"><pre id="modalBody"></pre></div></div></div>
+<dialog id="workflowDialog" aria-labelledby="workflowTitle">
+  <header><b id="workflowTitle">진행 모드 선택</b><span class="grow"></span><button id="workflowClose" aria-label="모드 선택 닫기">닫기</button></header>
+  <div class="content">
+    <div class="help">다음 요청을 어떤 방식으로 진행할지 선택하세요.</div>
+    <div class="workflow-options">
+      <button class="workflow-option" data-workflow="development" aria-pressed="false"><b>개발 모드</b><span class="help">설계·구현·검증 역할이 계획을 나누고 개발 작업을 수행합니다.</span></button>
+      <button class="workflow-option" data-workflow="research" aria-pressed="false"><b>연구 모드</b><span class="help">목표를 명확히 한 뒤 두 모델이 해결안과 반례를 주고받으며 문제를 풀어갑니다.</span></button>
+    </div>
+    <div class="help" id="workflowChangeHint" role="status"></div>
+    <div class="row" style="margin-top:12px"><button id="workflowRoles">역할·모델 설정</button></div>
+  </div>
+</dialog>
 <div id="pendingTray" class="zero">
   <div class="trayhead"><span>승인 대기 <b id="pendingCount">0</b></span><span class="grow"></span><button id="pendingToggle">접기</button></div>
   <div id="pending"></div>
 </div>
 <div class="toast" id="toast"></div>
+<div id="authNotice" role="alert" hidden><span id="authNoticeText"></span><button id="authRetry" type="button">다시 연결</button></div>
 
 <style>
 .doctoolbar { height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden; }
@@ -342,16 +414,25 @@ td button { white-space: nowrap; margin-bottom: 4px; }
 .activity-purple { color:#bb9af7; }.activity-red { color:#f7768e; }.activity-yellow { color:#e0af68; }.activity-green { color:#9ece6a; }.activity-muted { color:#999; }
 #activityRoles { flex:none;height:32px;display:flex;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;gap:6px;align-items:center;padding:0 8px;border-bottom:1px solid var(--line); }
 .achip { flex:none;width:220px;height:24px;line-height:22px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--chip);font-size:12px; }
+#authNotice { position:fixed;z-index:180;top:54px;left:50%;transform:translateX(-50%);width:min(600px,calc(100% - 24px));padding:12px;display:flex;gap:12px;align-items:center;background:var(--panel);border:1px solid var(--accent);border-radius:8px;box-shadow:0 4px 20px #0006; }
+#authNotice[hidden] { display:none; }
+#authNoticeText { flex:1;min-width:0;overflow-wrap:anywhere; }
+#authRetry { min-height:44px;flex:none; }
+.device-row { display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid var(--line); }
+.device-row>div { flex:1;min-width:0;overflow-wrap:anywhere; }
+.device-row button { flex:none;min-height:44px; }
 </style>
+<link rel="stylesheet" href="/static/mobile.css">
 <script src="/static/md.js"></script>
 <script src="/static/activity.js"></script>
 <script src="/static/doctree.js"></script>
+<script src="/static/auth.js"></script>
 <script>
 (() => {
 const $ = s => document.querySelector(s);
-const token = new URLSearchParams(location.search).get("t") || "";
-if (token) history.replaceState(null, "", "/");
+const auth = DuetAuth.create(window);
 let ws, S = null, rid = 0;
+let connecting = false, retryTimer = null, retryDelay = 1500, authBlocked = false;
 let activityNow = DuetActivity.clock(Date.now()/1000, performance.now()/1000);
 const activityRoles=document.createElement('div');activityRoles.id='activityRoles';$('#v-live').prepend(activityRoles);
 const docButtons=new Map();let docShown=null;let docRows=[];
@@ -371,7 +452,7 @@ function drawDocTree(){
       b=document.createElement('button');b.type='button';b.className='trow '+e.kind;
       b.innerHTML='<span class="tw"></span><span class="tn"></span><span class="'+(e.kind==='folder'?'tc':'td')+'"></span>';
       if(e.kind==='folder')b.onclick=()=>{const cur=b.classList.contains('open');docTreeState[b.dataset.path]=!cur;saveDocTree();drawDocTree();};
-      else b.onclick=()=>{docViewer.select(b.dataset.path);docShown=b.dataset.path;drawDocTree();};
+      else b.onclick=()=>{selectDocument(b.dataset.path);docShown=b.dataset.path;drawDocTree();};
       docButtons.set(e.key,b);
     }
     b.dataset.path=e.path;b.style.paddingLeft=(8+e.depth*14)+'px';
@@ -385,7 +466,7 @@ function drawDocTree(){
   while(anchor?anchor.nextSibling:box.firstChild)(anchor?anchor.nextSibling:box.firstChild).remove();
 }
 const docViewer=renderMarkdown.createViewer({
-  fetch:async url=>{const res=await fetch(url+(url.includes('?')?'&':'?')+'t='+encodeURIComponent(token));if(!res.ok)throw new Error('문서를 열 수 없습니다 ('+res.status+')');return res.json();},
+  fetch:url=>auth.json(url),
   setInterval:(f,ms)=>setInterval(f,ms),clearInterval:id=>clearInterval(id),
   onList:rows=>{docRows=rows;drawDocTree();},
   onDocument:doc=>{
@@ -397,17 +478,24 @@ const docViewer=renderMarkdown.createViewer({
   },
   onError:e=>{docShown=null;$('#docBody').textContent=e.message;}
 });
+function selectDocument(path) {
+  window.DuetMobile?.openDocument();
+  docViewer.select(path);
+}
 $('#docFilter').oninput=e=>docViewer.filter(e.target.value);
 $('#docRefresh').onclick=()=>docViewer.refresh(true);
 $('#docExpand').onclick=()=>{for(const f of DocTree.folders(docRows))docTreeState[f]=true;docTreeState[DocTree.RECENT]=true;saveDocTree();drawDocTree();};
 $('#docCollapse').onclick=()=>{for(const f of DocTree.folders(docRows))docTreeState[f]=false;saveDocTree();drawDocTree();};
-$('#docBody').onclick=e=>{const a=e.target.closest('a');if(!a)return;const href=a.getAttribute('href');const path=docViewer.relative(href);if(path){e.preventDefault();docViewer.select(path);}else if(!/^https?:\/\//i.test(href)){e.preventDefault();}};
+$('#docBody').onclick=e=>{const a=e.target.closest('a');if(!a)return;const href=a.getAttribute('href');const path=docViewer.relative(href);if(path){e.preventDefault();selectDocument(path);}else if(!/^https?:\/\//i.test(href)){e.preventDefault();}};
 
 const activityChips=new Map();
 function drawActivity() {
   if(!S)return;
-  const entries=Object.entries(S.status.activity||{}),now=activityNow(performance.now()/1000);
-  for(const [n,c] of activityChips)if(!(S.status.activity||{})[n]){c.remove();activityChips.delete(n);}
+  const entries=Object.entries(S.status.activity||{}).filter(([name])=>{
+    const role=S.roles.find(r=>r.name===name.split("#")[0]);
+    return !role || isResearchRole(role)===(S.status.workflow==="research");
+  }),now=activityNow(performance.now()/1000),visible=new Set(entries.map(([name])=>name));
+  for(const [n,c] of activityChips)if(!visible.has(n)){c.remove();activityChips.delete(n);}
   for(const [n,a] of entries){
     let c=activityChips.get(n);
     if(!c){c=document.createElement('span');activityChips.set(n,c);activityRoles.append(c);}
@@ -431,11 +519,45 @@ const knownRoles = new Set();
 function send(obj) { obj.rid = ++rid; if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; } return false; }
 function toast(text) { if (!text) return; const t = $("#toast"); t.textContent = text; t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), 6000); }
 
-function connect() {
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${token ? "?t=" + encodeURIComponent(token) : ""}`);
-  ws.onopen = () => { const c = $("#conn"); c.textContent = "연결"; c.title = "서버에 연결됨"; c.classList.remove("off"); };
-  ws.onclose = () => { const c = $("#conn"); c.textContent = "끊김"; c.title = "연결 끊김 — 재시도 중"; c.classList.add("off"); conventionEditor.loading = false; conventionEditor.saving = null; conventionEditor.loaded = false; setTimeout(connect, 1500); };
-  ws.onmessage = m => onMessage(JSON.parse(m.data));
+function authNotice(message) {
+  $("#authNotice").hidden = !message;
+  $("#authNoticeText").textContent = message || "";
+}
+function blockAuth(message) {
+  authBlocked = true; auth.forget(); clearTimeout(retryTimer);
+  if (ws) ws.close();
+  $("#conn").textContent = "재인증"; $("#conn").classList.add("off");
+  $("#conn").title = message; authNotice(message);
+  $("#devicesState").textContent = message;
+  $("#devicesList").replaceChildren();
+}
+function retryConnection() {
+  clearTimeout(retryTimer);
+  if (authBlocked) return;
+  retryTimer = setTimeout(connect, retryDelay);
+  retryDelay = Math.min(retryDelay * 2, 30000);
+}
+async function connect() {
+  if (connecting || authBlocked || (ws && ws.readyState < 2)) return;
+  clearTimeout(retryTimer); connecting = true;
+  try {
+    const session = await auth.authorize();
+    if (authBlocked) return;
+    authNotice(session.trusted ? "" : session.legacy ? "화면은 업데이트됐습니다. 브라우저 등록 기능은 Duet 서버를 다음에 재시작하면 적용됩니다. 현재 연결은 계속 사용할 수 있습니다." : "쿠키를 저장하지 못해 이 브라우저가 등록되지 않았습니다. 쿠키를 허용한 뒤 다시 연결을 누르면 새로고침하여 등록합니다. 현재 토큰 주소는 그대로 유지됩니다.");
+    const socket = new WebSocket(auth.socketURL()); ws = socket;
+    socket.onopen = () => { retryDelay = 1500; const c = $("#conn"); c.textContent = "연결"; c.title = session.trusted ? "등록된 브라우저로 연결됨" : "토큰 주소로 연결됨"; c.classList.remove("off"); if ($("#v-settings").classList.contains("on")) loadDevices(); };
+    socket.onclose = e => {
+      if (ws !== socket) return;
+      conventionEditor.loading = false; conventionEditor.saving = null; conventionEditor.loaded = false;
+      if (e.code === 4001) { blockAuth("이 브라우저의 접속 등록이 해제되었습니다. 터미널의 토큰 주소로 다시 접속하세요."); return; }
+      if (authBlocked) return;
+      const c = $("#conn"); c.textContent = "끊김"; c.title = "연결 끊김 · 재시도 중"; c.classList.add("off"); retryConnection();
+    };
+    socket.onmessage = m => onMessage(JSON.parse(m.data));
+  } catch (e) {
+    if (e.status === 403) blockAuth(e.message);
+    else { $("#conn").textContent = "재연결"; $("#conn").classList.add("off"); retryConnection(); }
+  } finally { connecting = false; }
 }
 
 function onMessage(msg) {
@@ -474,6 +596,8 @@ function setState(st) {
 
 function renderStatus(s) {
   if (!S) return; S.status = s;
+  if (s.main) S.main = s.main;
+  renderWorkflow(s);
   renderJevStatus(s.jev);
   activityNow=DuetActivity.clock(s.server_now == null ? Date.now()/1000 : s.server_now,performance.now()/1000);
   const run = s.running || (s.busy ? "진행 중" : null);
@@ -505,11 +629,41 @@ function renderStatus(s) {
   drawActivity();
 }
 
+function renderWorkflow(s) {
+  const selected = s.workflow || "development", research = selected === "research";
+  $("#btnWorkflow").textContent = (research ? "연구 모드" : "개발 모드") + " ▾";
+  const canChange = s.workflow_can_change !== false;
+  $("#workflowDialog").querySelectorAll("[data-workflow]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.workflow === selected));
+    button.disabled = !canChange && button.dataset.workflow !== selected;
+  });
+  $("#workflowChangeHint").textContent = canChange ? "선택한 모드는 다음 요청부터 적용됩니다. 역할·모델은 각 모드별로 설정할 수 있습니다." : (s.workflow_change_reason || "진행 중인 요청이 끝난 뒤 모드를 변경할 수 있습니다.");
+  $("#developmentRolesCard").classList.toggle("active", !research);
+  $("#researchRolesCard").classList.toggle("active", research);
+  $("#developmentRolesActive").hidden = research;
+  $("#researchRolesActive").hidden = !research;
+  $("#researchProgress").hidden = !research;
+  const r = s.research || {};
+  const phases = {idle:"주제 대기", running:"진행 중", awaiting_user:"사용자 답변 대기", completed:"완료", paused:"진행 보류"};
+  const stages = {clarify:"목표·조건 확인", independent_explorer:"독립 해결안 작성", independent_critic:"독립 검토", explore:"해결안 탐색", critique:"맹점 검토", verify:"검증", revise:"해결안 개선", reframe:"새 관점 탐색", synthesize:"해결안 정리", repair:"응답 보완"};
+  $("#researchPhase").textContent = (phases[r.phase] || r.phase || "주제 대기") + (r.turns ? ` · ${r.turns}턴` : "");
+  $("#researchAction").textContent = [({explorer:"탐색자", critic:"비판자"})[r.active_role] || r.active_role, stages[r.stage] || r.stage, r.wait_reason].filter(Boolean).join(" · ");
+  $("#researchGoal").textContent = r.goal || (r.phase === "running" ? "요청의 목표와 선행 조건을 정리하고 있습니다." : "해결하고 싶은 문제를 입력하세요. 필요한 조건을 먼저 확인하고 토론을 시작합니다.");
+}
+
+function chooseWorkflow(name) {
+  if (!S || !["development", "research"].includes(name)) return;
+  if (name === (S.status.workflow || "development")) { $("#workflowDialog").close(); return; }
+  if (S.status.workflow_can_change === false) { toast(S.status.workflow_change_reason || "진행 중인 요청이 끝난 뒤 모드를 변경할 수 있습니다."); return; }
+  if (send({type:"workflow", name})) $("#workflowDialog").close();
+  else toast("서버에 연결된 뒤 다시 선택하세요.");
+}
+
 function renderTargets() {
   if (!S) return;
   const sel = $("#target"), cur = sel.value;
   const opts = [`<option value="">메인 (${esc(S.main)})</option>`]
-    .concat(S.roles.filter(r => !r.is_main).map(r => `<option value="${esc(r.name)}">@${esc(r.name)}</option>`))
+    .concat(S.roles.filter(r => r.name !== S.main && isResearchRole(r) === (S.status.workflow === "research")).map(r => `<option value="${esc(r.name)}">@${esc(r.name)}</option>`))
     .concat((S.status.work || []).filter(w => !["merged", "failed", "cancelled"].includes(w.status)).map(w => `<option value="${esc(w.id)}">작업 ${esc(w.id)}</option>`));
   sel.innerHTML = opts.join(""); sel.value = [...sel.options].some(o => o.value === cur) ? cur : "";
 }
@@ -528,6 +682,23 @@ function addRow(feedEl, cls, who, html, ts, live) {
 }
 const scrollEnd = el => { el.scrollTop = el.scrollHeight; };
 
+function visibleTurnSummary(summary, role) {
+  const text = String(summary || "");
+  if (!["explorer", "critic"].includes((role || "").split("#")[0])) return text;
+  const lines = []; let fence = null;
+  for (const line of text.split("\n")) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (!fence && marker) {
+      fence = {run:marker[1], hidden:marker[1] === "```" && marker[2].trim() === "duet-research"};
+      if (fence.hidden) continue;
+    } else if (fence && marker && marker[1][0] === fence.run[0] && marker[1].length >= fence.run.length && !marker[2].trim()) {
+      const hidden = fence.hidden; fence = null; if (hidden) continue;
+    }
+    if (!fence || !fence.hidden) lines.push(line);
+  }
+  return lines.join("\n").trim();
+}
+
 function onEvent(e, replay) {
   const d = e.data || {}, r = e.role, flow = $("#flow"), st = $("#stream");
   if (r) { const base = r.split("#")[0]; if (!knownRoles.has(base) && base !== "human" && base !== "duet") knownRoles.add(base); }
@@ -537,7 +708,7 @@ function onEvent(e, replay) {
     case "turn_start": addRow(st, "turn", r, `▶ ${d.n ? "#" + d.n + " " : ""}${esc(d.kind)} 시작${d.kind === "delegate" || d.info && d.n === 0 ? " · " + esc(short(d.info, 120)) : ""}`, e.ts, replay); break;
     case "turn_end": {
       const dirs = (d.directives || []).map(([a, b]) => `<span class="pill">${esc(a)}${b ? " " + esc(short(b, 60)) : ""}</span>`).join(" ");
-      if (d.n) addRow(flow, "", r, `<b>#${d.n}</b> ${esc(d.summary || "")} ${dirs}`, e.ts, replay);
+      if (d.n) addRow(flow, "", r, `<b>#${d.n}</b> ${esc(visibleTurnSummary(d.summary, r))} ${dirs}`, e.ts, replay);
       addRow(st, "turn", r, `■ 턴 끝${d.ok === false ? " (오류)" : ""}`, e.ts, replay);
       break;
     }
@@ -716,19 +887,27 @@ function modelOptions(cli, cur) {
   return html + `<option value="__custom">직접 입력…</option>`;
 }
 const splitModel = v => { const i = v.indexOf("::"); return i < 0 ? [null, v] : [v.slice(0, i), v.slice(i + 2)]; };
+const isResearchRole = r => r.workflow === "research" || ["explorer", "critic"].includes(r.name);
+function roleRows(roles) {
+  const efforts = ["", "low", "medium", "high", "xhigh"];
+  return roles.map(r => {
+    const research = isResearchRole(r), label = (r.label && r.label !== r.name ? r.label : "") || ({explorer:"탐색자", critic:"비판자"})[r.name];
+    return `<tr data-n="${esc(r.name)}">
+    <td class="role-card-heading"><b style="color:${colorOf(r.name)}">${label ? `${esc(label)} <span class="help">${esc(r.name)}</span>` : esc(r.name)}</b>${!research && r.is_main ? " ★" : ""}<div class="help" style="max-width:260px">${esc(short(r.brief, 160))}</div></td>
+    <td data-label="CLI"><select data-f="cli" aria-label="${esc(r.name)} CLI">${S.clis.map(c => `<option ${c === r.cli ? "selected" : ""}>${c}</option>`).join("")}</select></td>
+    <td data-label="모델"><select data-f="model" aria-label="${esc(r.name)} 모델">${modelOptions(r.cli, r.model)}</select></td>
+    <td data-label="추론 수준"><select data-f="effort" aria-label="${esc(r.name)} 추론 수준">${efforts.map(e => `<option value="${e}" ${e === (r.effort || "") ? "selected" : ""}>${e || "기본"}</option>`).join("")}</select></td>
+    <td data-label="권한"><select data-f="permissions" aria-label="${esc(r.name)} 권한">${S.permissions.map(p => `<option ${p === r.permissions ? "selected" : ""}>${p}</option>`).join("")}</select></td>
+    <td data-label="${research ? '진행' : '병렬 최대'}">${research ? "<span class='help'>동등한 토론자</span>" : r.is_main ? "<span class='help'>—</span>" : `<input type="number" min="1" data-f="max_sessions" value="${r.max_sessions}" aria-label="${esc(r.name)} 병렬 최대 세션">`}</td>
+    <td data-label="컨텍스트 한도"><input type="number" min="0" step="10000" data-f="context_limit" value="${r.context_limit || ""}" placeholder="기본" aria-label="${esc(r.name)} 컨텍스트 한도"></td>
+    <td class="role-card-actions">${research || r.is_main ? "" : `<button data-main>메인으로</button> <button class="danger" data-del>삭제</button>`}</td></tr>`;
+  }).join("");
+}
 function renderRoles() {
   if (!S) return;
-  const efforts = ["", "low", "medium", "high", "xhigh"];
-  $("#roles").innerHTML = S.roles.map(r => `<tr data-n="${esc(r.name)}">
-    <td><b style="color:${colorOf(r.name)}">${esc(r.name)}</b>${r.is_main ? " ★" : ""}<div class="help" style="max-width:260px">${esc(short(r.brief, 160))}</div></td>
-    <td><select data-f="cli">${S.clis.map(c => `<option ${c === r.cli ? "selected" : ""}>${c}</option>`).join("")}</select></td>
-    <td><select data-f="model">${modelOptions(r.cli, r.model)}</select></td>
-    <td><select data-f="effort">${efforts.map(e => `<option value="${e}" ${e === (r.effort || "") ? "selected" : ""}>${e || "기본"}</option>`).join("")}</select></td>
-    <td><select data-f="permissions">${S.permissions.map(p => `<option ${p === r.permissions ? "selected" : ""}>${p}</option>`).join("")}</select></td>
-    <td>${r.is_main ? "<span class='help'>—</span>" : `<input type="number" min="1" data-f="max_sessions" value="${r.max_sessions}">`}</td>
-    <td><input type="number" min="0" step="10000" data-f="context_limit" value="${r.context_limit || ""}" placeholder="기본"></td>
-    <td>${r.is_main ? "" : `<button data-main>메인으로</button> <button class="danger" data-del>삭제</button>`}</td></tr>`).join("");
-  $("#roles").querySelectorAll("tr").forEach(tr => {
+  $("#roles").innerHTML = roleRows(S.roles.filter(r => !isResearchRole(r)));
+  $("#researchRoles").innerHTML = roleRows(S.roles.filter(isResearchRole));
+  $("#v-roles").querySelectorAll("tr[data-n]").forEach(tr => {
     const name = tr.dataset.n;
     const role = S.roles.find(x => x.name === name);
     tr.querySelectorAll("[data-f]").forEach(el => el.onchange = () => {
@@ -792,7 +971,7 @@ function renderJevStatus(v) {
   $("#jevKeyClear").disabled = !["saved", "unavailable"].includes(credential.source);
   $("#jevUsage").textContent = `이번 실행: ${(v.calls || 0).toLocaleString()}회 판단 · 입력 ${(v.input_tokens || 0).toLocaleString()} / 출력 ${(v.output_tokens || 0).toLocaleString()} 토큰 · 예상 $${Number(v.estimated_cost_usd || 0).toFixed(6)} · 오류 복귀 ${(v.fallbacks || 0).toLocaleString()}회`;
   const last = v.last;
-  const purposes = {choice: "자동 선택", approval: "승인 판단", approval_confirm: "승인 재확인", flow: "정체 판단", handoff: "인계 판단", idle: "응답 대기 판단", turn_route: "질문·턴 전달"};
+  const purposes = {choice: "자동 선택", approval: "승인 판단", approval_confirm: "승인 재확인", flow: "정체 판단", handoff: "인계 판단", idle: "응답 대기 판단", turn_route: "질문·턴 전달", research_route: "연구 토론 진행", research: "연구 토론 진행"};
   $("#jevLast").textContent = last ? `최근: ${purposes[last.purpose] || last.purpose} · ${last.mode === "shadow" ? "관찰" : "적용"} · ${last.error ? "오류: " + last.error : "판단 완료"}` : "아직 JEV 관제 판단이 없습니다. 연결 확인 사용량은 위 집계에 포함하지 않습니다.";
 }
 const conventionEditor = {loaded: false, loading: false, dirty: false, saving: null, version: "", revision: 0, readRid: null};
@@ -871,6 +1050,41 @@ function renderConventions() {
   };
   if (!conventionEditor.loaded && !conventionEditor.loading) readConventions();
 }
+let devicesLoading = false;
+async function loadDevices() {
+  if (devicesLoading || authBlocked) return;
+  devicesLoading = true; $("#devicesState").textContent = "등록된 브라우저를 확인합니다…";
+  try {
+    const data = await auth.json("/api/devices");
+    if (authBlocked) return;
+    $("#deviceForget").disabled = !data.devices.some(d => d.current);
+    $("#devicesState").textContent = `${data.devices.length}개 등록 · 접속 주소와 브라우저별로 구분합니다.`;
+    const rows = data.devices.map(d => {
+      const row = document.createElement("div"); row.className = "device-row";
+      const body = document.createElement("div"), title = document.createElement("b"), detail = document.createElement("div");
+      title.textContent = d.label + (d.current ? " · 현재 브라우저" : "");
+      detail.className = "help";
+      detail.textContent = `최근 접속 ${new Date(d.last_seen * 1000).toLocaleString()} · 만료 ${new Date(d.expires_at * 1000).toLocaleDateString()}`;
+      body.append(title, detail);
+      const button = document.createElement("button"); button.type = "button"; button.className = "danger"; button.textContent = "해제";
+      button.onclick = () => revokeDevice(d);
+      row.append(body, button); return row;
+    });
+    $("#devicesList").replaceChildren(...rows);
+  } catch (e) { $("#devicesState").textContent = e.message; }
+  finally { devicesLoading = false; }
+}
+async function revokeDevice(device) {
+  const current = !device || device.current;
+  if (!confirm(current ? "이 브라우저의 등록을 해제할까요? 연결이 종료되며, 다시 접속하려면 토큰 주소가 필요합니다." : `${device.label}의 등록을 해제할까요? 해당 브라우저의 연결이 종료됩니다.`)) return;
+  try {
+    await auth.json(current ? "/api/logout" : "/api/devices/revoke", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(current ? {} : {id:device.id})});
+    if (current) blockAuth("이 브라우저의 등록을 해제했습니다. 다시 접속하려면 터미널의 토큰 주소를 사용하세요.");
+    else { toast("브라우저 등록을 해제했습니다."); loadDevices(); }
+  } catch (e) { toast(e.message); }
+}
+$("#devicesRefresh").onclick = loadDevices;
+$("#deviceForget").onclick = () => revokeDevice(null);
 function renderSettings() {
   const box = $("#settings"); if (!S) return;
   const fa = !!S.settings.full_auto, active = !!(S.status && S.status.full_auto);
@@ -903,7 +1117,7 @@ function renderSettings() {
   box.querySelectorAll("[data-k]").forEach(el => el.onchange = () => send({type: "setting", key: el.dataset.k, value: el.type === "checkbox" ? el.checked : el.value}));
 }
 function renderSaves() {
-  $("#saves").innerHTML = (S.saves || []).map(s => `<tr><td class="mono">${esc(s.name)}</td><td>${esc(s.created_at)}</td><td>#${esc(s.last_n ?? "?")}</td><td>${esc(s.mode ?? "")}</td><td>${esc(s.note ?? "")}</td>
+  $("#saves").innerHTML = (S.saves || []).map(s => `<tr><td class="mono" data-label="이름">${esc(s.name)}</td><td data-label="저장 시각">${esc(s.created_at)}</td><td data-label="턴">#${esc(s.last_n ?? "?")}</td><td data-label="모드">${esc(s.mode ?? "")}</td><td data-label="메모">${esc(s.note ?? "")}</td>
     <td><button data-load="${esc(s.name)}">불러오기</button> <button class="danger" data-del="${esc(s.name)}">삭제</button></td></tr>`).join("") || `<tr><td colspan="6" class="help">저장된 세션이 없습니다.</td></tr>`;
   $("#saves").querySelectorAll("[data-load]").forEach(b => b.onclick = () => { if (confirm(b.dataset.load + " 을(를) 불러올까요? 현재 상태는 자동 저장됩니다.")) send({type: "load", name: b.dataset.load}); });
   $("#saves").querySelectorAll("[data-del]").forEach(b => b.onclick = () => { if (confirm(b.dataset.del + " 저장본을 삭제할까요?")) send({type: "delete_save", name: b.dataset.del}); });
@@ -920,9 +1134,10 @@ function onAsk(m) {
 }
 function sendAsk() {
   const t = $("#askInput").value.trim(); if (!t) return;
+  if (!send({type: "ask", role: $("#askRole").value, text: t})) { toast("연결된 뒤 다시 보내세요. 작성한 질문은 유지됩니다."); return; }
   const el = document.createElement("div"); el.className = "qa"; el.innerHTML = `<div class="q">${esc(t)}</div><div class="dim">생각 중…</div>`;
   $("#askLog").appendChild(el); askBusy = el; scrollEnd($("#askLog"));
-  send({type: "ask", role: $("#askRole").value, text: t}); $("#askInput").value = "";
+  $("#askInput").value = "";
 }
 
 // ---------------- 모달 ----------------
@@ -935,6 +1150,8 @@ document.querySelectorAll("#nav button").forEach(b => b.onclick = () => {
   $("#composer").style.display = ["live", "work"].includes(b.dataset.v) ? "" : "none";
   trackComposer();
   docViewer.setOpen(b.dataset.v==='docs');
+  window.DuetMobile?.viewChanged(b.dataset.v);
+  if (b.dataset.v === "settings") loadDevices();
 });
 function sendInput(immediate = false) {
   const t = $("#input").value.trim(); if (!t) return;
@@ -944,7 +1161,7 @@ function sendInput(immediate = false) {
     if (to) msg.to = to;
     if (immediate === true) msg.immediate = true;
   }
-  send(msg);
+  if (!send(msg)) { toast("연결된 뒤 다시 보내세요. 작성한 메시지는 유지됩니다."); return; }
   $("#input").value = "";
 }
 $("#send").onclick = () => sendInput();
@@ -964,7 +1181,11 @@ if ("ResizeObserver" in window) { const ro = new ResizeObserver(trackComposer); 
 window.addEventListener("resize", trackComposer); trackComposer();
 $("#pendingToggle").onclick = () => { const t = $("#pendingTray"); t.classList.toggle("collapsed"); $("#pendingToggle").textContent = t.classList.contains("collapsed") ? "펴기" : "접기"; };
 $("#pendingBadge").onclick = () => { const t = $("#pendingTray"); t.classList.remove("collapsed"); $("#pendingToggle").textContent = "접기"; };
-$("#boardBatch").onclick = () => { const b = $("#boardBatch").dataset.brief; if (!b) return; document.querySelector('#nav button[data-v="docs"]').click(); docViewer.select(b); };
+$("#boardBatch").onclick = () => { const b = $("#boardBatch").dataset.brief; if (!b) return; document.querySelector('#nav button[data-v="docs"]').click(); selectDocument(b); };
+$("#btnWorkflow").onclick = () => { if (S) renderWorkflow(S.status); $("#workflowDialog").showModal(); };
+$("#workflowClose").onclick = () => $("#workflowDialog").close();
+$("#workflowDialog").querySelectorAll("[data-workflow]").forEach(button => button.onclick = () => chooseWorkflow(button.dataset.workflow));
+$("#workflowRoles").onclick = () => { $("#workflowDialog").close(); document.querySelector('#nav button[data-v="roles"]').click(); };
 $("#btnPause").onclick = () => send({type: "control", action: S && S.status.paused ? "resume" : "pause"});
 $("#btnStop").onclick = () => send({type: "control", action: "stop"});
 $("#mode").onchange = e => {
@@ -985,8 +1206,18 @@ $("#nrAdd").onclick = () => {
   $("#nrPreset").value = "";
 };
 if ("Notification" in window && Notification.permission === "default") document.addEventListener("click", () => Notification.requestPermission(), {once: true});
+$("#authRetry").onclick = () => {
+  if (!auth.trusted && new URL(location.href).searchParams.has("t")) { location.reload(); return; }
+  authBlocked = false; authNotice(""); retryDelay = 1500;
+  if (ws) { const old = ws; ws = null; old.close(); }
+  connect();
+};
+window.addEventListener("online", () => { retryDelay = 1500; connect(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { retryDelay = 1500; connect(); } });
+window.addEventListener("pageshow", e => { if (e.persisted && !authBlocked) { if (ws) { const old = ws; ws = null; old.close(); } connect(); } });
 connect();
 })();
 </script>
+<script src="/static/mobile.js"></script>
 </body>
 </html>

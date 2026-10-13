@@ -1,6 +1,6 @@
 """duet 웹 UI 서버 — `python3 duet --web`.
 
-- 로컬(127.0.0.1)에서만 열고, 실행마다 새 토큰을 만들어 주소에 붙인다 (토큰 없는 요청은 거부).
+- 실행마다 새 토큰을 만들어 주소에 붙이고, 인증한 브라우저는 만료·해제 전까지 기억한다.
 - 브라우저와 WebSocket 으로 이벤트를 실시간 전송하고, 승인·선택·명령·역할/설정 편집을 받는다.
 - 오케스트레이터에게는 HumanUI(ask_approval / ask_choice) 구현체로 붙는다. 여러 승인을 동시에 띄울 수 있다.
 """
@@ -20,7 +20,8 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from .. import commands
-from ..core.config import PERMISSION_PROFILES, ROLE_PRESETS, SUPPORTED_CLIS, Config, Role, preset_role, presets_info, validate_role_name
+from ..core.config import (PERMISSION_PROFILES, RESEARCH_ROLE_LABELS, ROLE_PRESETS, SUPPORTED_CLIS,
+                          Config, Role, preset_role, presets_info, validate_role_name)
 from ..core.conventions import load_conventions, save_conventions
 from ..core.events import Event, EventBus
 from ..core.fsutil import is_link
@@ -28,9 +29,11 @@ from ..core.jev_settings import clear_api_key, get_api_key, key_status, set_api_
 from ..core.models import read_cache, refresh
 from ..core.orchestrator import Orchestrator
 from ..core.policy import ApprovalRequest, Decision, read_only_decision
+from .auth import AuthStorageError, DeviceRegistry, TRUST_DAYS, normalize_origin
 
 STATIC = Path(__file__).parent / "static"
 REPLAY = 3000
+AUTH_RECHECK_SECONDS = 15
 
 # 웹에서 바꿀 수 있는 설정: 키 → (형 변환, 검사, 설명)
 SETTINGS: dict[str, tuple[Any, Any, str]] = {
@@ -176,9 +179,12 @@ class WebUI:
             "name": self.cfg.project.name,
             "status": o.status(),
             "roles": [{**r.to_yaml(), "name": r.name, "effort": r.effort, "context_limit": r.context_limit,
+                       "workflow": "research" if r.name in RESEARCH_ROLE_LABELS else "development",
+                       "label": RESEARCH_ROLE_LABELS.get(r.name, r.name),
                        "max_sessions": r.max_sessions, "is_main": r.name == self.cfg.main}
                       for r in self.cfg.roles.values()],
-            "main": self.cfg.main,
+            "main": o.active_main,
+            "development_main": self.cfg.main,
             "clis": list(SUPPORTED_CLIS),
             "installed": sorted(self.installed),
             "presets": presets_info(self.installed),
@@ -263,6 +269,12 @@ class WebUI:
         if t == "mode":
             out = o.set_mode(str(msg.get("name")))
             return {"type": "output", "text": out, "state": self.state()}
+        if t == "workflow":
+            try:
+                out = o.set_workflow(str(msg.get("name")))
+                return {"type": "output", "text": out, "state": self.state()}
+            except ValueError as e:
+                return {"type": "output", "error": str(e), "text": str(e), "state": self.state()}
         if t == "turns":
             v = msg.get("value")
             out = o.set_max_turns(None if v in (None, "", "inf", 0) else int(v))
@@ -331,10 +343,12 @@ class WebUI:
     async def _role_set(self, msg: dict) -> dict:
         name, field, value = str(msg.get("name")), str(msg.get("field")), msg.get("value")
         if field == "main":
+            if name in RESEARCH_ROLE_LABELS:
+                return {"type": "output", "text": "연구 역할은 동등한 두 토론자로 참여합니다. 개발 메인 역할로 지정할 수 없습니다."}
             if name not in self.cfg.roles:
                 return {"type": "output", "text": f"'{name}' 역할이 없습니다."}
             self.cfg.main = name
-            self.orch.policy.main_role = name
+            self.orch.policy.main_role = self.orch.active_main
             self.cfg.save_roles()
             return {"type": "output", "text": f"메인 역할: {name} (다음 턴부터)", "state": self.state()}
         if field == "permissions" and value not in PERMISSION_PROFILES:
@@ -651,17 +665,67 @@ def _read_doc(root: Path, raw: str) -> dict:
 
 
 def build_app(ui: WebUI) -> web.Application:
+    registry = DeviceRegistry(ui.cfg.project, ui.cfg.dir)
+    device_clients: dict[web.WebSocketResponse, str] = {}
+
+    def request_origin(request: web.Request) -> str | None:
+        # Never use proxy-supplied Forwarded/X-Forwarded-* headers as authority.
+        return normalize_origin(f"{request.scheme}://{request.host}")
+
+    def same_origin(request: web.Request) -> bool:
+        origin = request.headers.get("Origin")
+        return bool(origin and normalize_origin(origin) == request_origin(request))
+
+    def forbidden() -> web.Response:
+        return web.Response(status=403, text="duet: 브라우저 인증이 필요합니다. 터미널에 표시된 토큰 주소로 여세요.",
+                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
     @web.middleware
     async def auth(request: web.Request, handler):
         if request.path.startswith("/static/") or request.path == "/favicon.ico":
             return await handler(request)
-        tok = request.query.get("t") or request.cookies.get("duet_token") or ""
-        if not secrets.compare_digest(tok, ui.token):
-            return web.Response(status=403, text="duet: 토큰이 필요합니다. 터미널에 표시된 주소로 여세요.")
-        resp = await handler(request)
-        if request.query.get("t") and isinstance(resp, web.Response) and request.path == "/":
-            resp.set_cookie("duet_token", ui.token, httponly=True, samesite="Strict")
-        return resp
+        origin = request_origin(request)
+        if origin is None or (request.headers.get("Origin") is not None and not same_origin(request)):
+            return forbidden()
+        if request.headers.get("Sec-Fetch-Site") == "cross-site" and request.path != "/":
+            return forbidden()
+        # Cookie-authenticated POSTs cannot be driven by another site's forms.
+        if request.method not in ("GET", "HEAD") and (
+                not same_origin(request) or request.content_type != "application/json"):
+            return forbidden()
+        cookie_name = registry.cookie_name(origin)
+        credential = request.cookies.get(cookie_name, "")
+        token = request.query.get("t", "")
+        valid_token = bool(token and secrets.compare_digest(token.encode(), ui.token.encode()))
+        try:
+            device = registry.authenticate(credential, origin)
+            if not device and (not valid_token or request.path == "/api/session"):
+                return forbidden()
+            new_cookie = None
+            if request.method == "GET" and request.path == "/" and valid_token and not device:
+                new_cookie, device = registry.enroll(origin, request.headers.get("User-Agent", ""))
+                credential = new_cookie
+            request["auth_device"] = device
+            request["auth_credential"] = credential if device else None
+            request["auth_origin"] = origin
+            request["auth_cookie_name"] = cookie_name
+            request["auth_url_token"] = valid_token
+            if device and time.time() - device["last_seen"] >= 3600:
+                registry.touch(device["id"])
+            resp = await handler(request)
+            if isinstance(resp, web.Response):
+                resp.headers["Cache-Control"] = "no-store"
+                resp.headers["Referrer-Policy"] = "no-referrer"
+                if new_cookie:
+                    resp.set_cookie(cookie_name, new_cookie, max_age=max(1, int(device["expires_at"] - time.time())),
+                                    path="/", httponly=True, samesite="Lax", secure=request.secure)
+                    # Retire the old session-wide bearer cookie, which was shared
+                    # by every Duet port and invalidated on server restart.
+                    resp.del_cookie("duet_token", path="/")
+            return resp
+        except AuthStorageError as exc:
+            return web.json_response({"error": str(exc)}, status=503,
+                                     headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     app = web.Application(middlewares=[auth])
 
@@ -672,10 +736,41 @@ def build_app(ui: WebUI) -> web.Application:
     async def api_state(request: web.Request) -> web.Response:
         return web.json_response(ui.state(), dumps=lambda o: json.dumps(o, ensure_ascii=False, default=str))
 
+    async def api_session(request: web.Request) -> web.Response:
+        device = request["auth_device"]
+        return web.json_response({"authenticated": True, "trusted": True,
+                                  "device": registry.public(device, device["id"]), "expires_in_days": TRUST_DAYS})
+
+    async def api_devices(request: web.Request) -> web.Response:
+        device = request["auth_device"]
+        return web.json_response({"devices": registry.list(device["id"] if device else None),
+                                  "expires_in_days": TRUST_DAYS})
+
+    async def api_revoke(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeError):
+            return web.json_response({"error": "JSON 요청이 필요합니다."}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "JSON 객체가 필요합니다."}, status=400)
+        device = request["auth_device"]
+        device_id = device["id"] if request.path == "/api/logout" and device else body.get("id")
+        if not isinstance(device_id, str) or len(device_id) != 24:
+            return web.json_response({"error": "등록된 브라우저 ID가 필요합니다."}, status=400)
+        if not registry.revoke(device_id):
+            return web.json_response({"error": "등록된 브라우저가 없습니다."}, status=404)
+        current = bool(device and device_id == device["id"])
+        # Stop delivery immediately, before waiting for the client's close reply.
+        for ws, bound_id in list(device_clients.items()):
+            if bound_id == device_id:
+                ui.clients.discard(ws)
+                await ws.close(code=4001, message=b"Browser authorization revoked")
+        response = web.json_response({"ok": True, "revoked": device_id, "current": current})
+        if current:
+            response.del_cookie(request["auth_cookie_name"], path="/", secure=request.secure, httponly=True, samesite="Lax")
+        return response
+
     async def api_docs(request: web.Request) -> web.Response:
-        origin = request.headers.get('Origin')
-        if origin and origin.split('://', 1)[-1] != request.host:
-            return web.Response(status=403, text='origin')
         if request.path == '/api/docs':
             return web.json_response(await asyncio.to_thread(_docs, ui.cfg.project))
         raw = request.query.get('path', '')
@@ -687,18 +782,46 @@ def build_app(ui: WebUI) -> web.Application:
             return web.json_response({'error': str(e)}, status=400)
 
     async def ws_handler(request: web.Request) -> web.WebSocketResponse:
-        origin = request.headers.get("Origin")
-        if origin and origin.split("://", 1)[-1] != request.host:
-            return web.Response(status=403, text="origin")  # type: ignore[return-value]
+        if not same_origin(request) and not request["auth_url_token"]:
+            return forbidden()  # type: ignore[return-value]
         ws = web.WebSocketResponse(heartbeat=25, max_msg_size=8 * 1024 * 1024)
         await ws.prepare(request)
         ui.clients.add(ws)
-        await ws.send_str(json.dumps({"type": "hello", "state": ui.state(), "history": list(ui.history)},
-                                     ensure_ascii=False, default=str))
+        device = request["auth_device"]
+        if device:
+            device_clients[ws] = device["id"]
+
+        def authorized() -> bool:
+            if not device:
+                return True  # Explicit URL-token clients remain session scoped.
+            try:
+                current = registry.authenticate(request["auth_credential"], request["auth_origin"])
+                if current and time.time() - current["last_seen"] >= 3600:
+                    registry.touch(current["id"])
+                return current is not None
+            except AuthStorageError:
+                return False
+
+        async def monitor_auth() -> None:
+            # Enforce expiry and revocations made by another server for this
+            # project, including an idle socket that sends no more commands.
+            while not ws.closed:
+                await asyncio.sleep(AUTH_RECHECK_SECONDS)
+                if not authorized():
+                    ui.clients.discard(ws)
+                    await ws.close(code=4001, message=b"Browser authorization expired or revoked")
+                    return
+
+        monitor = asyncio.create_task(monitor_auth()) if device else None
         try:
+            await ws.send_str(json.dumps({"type": "hello", "state": ui.state(), "history": list(ui.history)},
+                                         ensure_ascii=False, default=str))
             async for m in ws:
                 if m.type != WSMsgType.TEXT:
                     continue
+                if not authorized():
+                    await ws.close(code=4001, message=b"Browser authorization expired or revoked")
+                    break
                 try:
                     msg = json.loads(m.data)
                 except json.JSONDecodeError:
@@ -713,10 +836,18 @@ def build_app(ui: WebUI) -> web.Application:
                     await ws.send_str(json.dumps(reply, ensure_ascii=False, default=str))
         finally:
             ui.clients.discard(ws)
+            device_clients.pop(ws, None)
+            if monitor:
+                monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
         return ws
 
     app.router.add_get("/", index)
     app.router.add_get("/api/state", api_state)
+    app.router.add_get("/api/session", api_session)
+    app.router.add_get("/api/devices", api_devices)
+    app.router.add_post("/api/devices/revoke", api_revoke)
+    app.router.add_post("/api/logout", api_revoke)
     app.router.add_get('/api/docs', api_docs)
     app.router.add_get('/api/doc', api_docs)
     app.router.add_get("/ws", ws_handler)
