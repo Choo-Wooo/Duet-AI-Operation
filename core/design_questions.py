@@ -25,7 +25,7 @@ class DesignQuestions:
 
     @property
     def enabled(self):
-        return bool(self.orch.cfg.settings.get("design_questions"))
+        return self.orch.cfg.state.workflow != "research" and bool(self.orch.cfg.settings.get("design_questions"))
 
     @property
     def state(self):

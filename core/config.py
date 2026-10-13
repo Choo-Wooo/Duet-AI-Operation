@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,8 @@ def validate_role_name(name: str) -> None:
 
 SUPPORTED_CLIS = ("claude", "codex", "agy")
 PERMISSION_PROFILES = ("read_only", "workspace_write")
+WORKFLOWS = {"development": "개발 모드", "research": "연구 모드"}
+RESEARCH_ROLE_LABELS = {"explorer": "탐색자", "critic": "비판자"}
 
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra", "agy": "gemini-3.8-flash-medium"}
 # 디자이너가 만든 화면을 직접 열어 보고 스크린샷으로 확인하는 브라우저 도구 (Claude Code 가 npx 로 실행)
@@ -149,6 +151,8 @@ class State:
     task: dict | None = None
     completed_delegations: list[dict] = field(default_factory=list)
     design_questions: dict = field(default_factory=dict)
+    workflow: str = "development"
+    research: dict = field(default_factory=dict)
 
 
 class Config:
@@ -266,6 +270,10 @@ class Config:
         validate_task(self.state.task)
         if self.state.mode not in self.modes:
             self.state.mode = "review"
+        if not isinstance(self.state.workflow, str) or self.state.workflow not in WORKFLOWS:
+            raise ValueError("state.workflow는 development 또는 research여야 합니다")
+        if not isinstance(self.state.research, dict):
+            raise ValueError("state.research는 객체여야 합니다")
 
     # ---------- 저장 ----------
     def save_roles(self) -> None:
@@ -312,6 +320,28 @@ class Config:
 
     def main_role(self) -> Role:
         return self.roles[self.main]
+
+
+def ensure_research_roles(cfg: Config) -> list[str]:
+    """Give both peers independent settings without changing existing development roles."""
+    primary = cfg.roles.get(cfg.main)
+    if primary is None:
+        return []
+    secondary = cfg.roles.get("implementer") or next(
+        (r for n, r in cfg.roles.items() if n != cfg.main and n not in RESEARCH_ROLE_LABELS), primary)
+    briefs = {
+        "explorer": "어려운 문제에 새로운 접근과 구체적인 해결안을 제시한다. 비판자의 반례를 반영하고 근거와 검증 방법을 함께 제시한다. 비판자와 동등한 책임을 진다.",
+        "critic": "어려운 문제를 독립적으로 분석하고 해결안의 가정·반례·실패 조건을 검토한다. 중요한 맹점에 수정안이나 판별 방법을 제시한다. 탐색자와 동등한 책임을 진다.",
+    }
+    added = []
+    for name, source in (("explorer", primary), ("critic", secondary)):
+        if name not in cfg.roles:
+            cfg.roles[name] = replace(source, name=name, brief=briefs[name], permissions="read_only",
+                                      max_sessions=1, auto_tools=[], mcp={})
+            added.append(name)
+    if added:
+        cfg.save_roles()
+    return added
 
 
 def detect_clis() -> dict[str, str]:

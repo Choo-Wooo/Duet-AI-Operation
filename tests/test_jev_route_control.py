@@ -6,6 +6,7 @@ import pytest
 
 from duet.core.jev import JevResult
 from duet.core.jev_control import EVIDENCE_RULE
+from duet.core.work import WorkItem
 from duet.tests.test_jev_control import api, control, judgment
 
 
@@ -186,6 +187,175 @@ def test_route_context_is_evidence_and_credentials_are_redacted(control):
     log = (control.orch.cfg.project / ".duet/logs/jev/DIALOGUE.md").read_text()
     assert "test-private-key" not in log and "another-private-key" not in log
     assert "question_quality" in log and "next_action" in log
+
+
+def test_selection_is_not_logged_as_executed(control):
+    api(control, judgment(question_quality="clear", next_action="architect"))
+    events = []
+    control.orch.bus.subscribe(events.append)
+    assert route(control) == "architect"
+    outcome, = [event.data for event in events if event.kind == "jev_outcome"]
+    assert outcome["action"] == "architect" and outcome["applied"] is False
+    log = (control.orch.cfg.project / ".duet/logs/jev/DIALOGUE.md").read_text()
+    assert '"관제 적용": false' in log and '"관제 적용": true' not in log
+
+
+def test_response_and_dialogue_evidence_is_bounded_redacted_and_not_mutated(control):
+    client = api(control, judgment(question_quality="not_question", next_action="repair"))
+    evidence = {
+        "response_text": "RESUME_WORK deployment test-private-key " + "x" * 9000,
+        "dialogue_text": "Recorded a deployment status, without any control. " + "y" * 9000,
+        "source_control_issue": "Bearer another-secret " + "z" * 4000,
+        "unrelated_private_payload": "must-not-send",
+    }
+    original = dict(evidence)
+    assert route(control, issue="Response and DIALOGUE controls differ.", evidence=evidence) == "repair"
+    state, questions = client.evaluate.call_args.args
+    context = state["routing_evidence"]
+    assert "RESUME_WORK" in context["response_text"]
+    assert "without any control" in context["dialogue_text"]
+    assert len(context["response_text"]) <= 4000 and len(context["dialogue_text"]) <= 4000
+    assert len(context["source_control_issue"]) <= 2000
+    assert "test-private-key" not in json.dumps(state) and "another-secret" not in json.dumps(state)
+    assert "must-not-send" not in json.dumps(state)
+    assert "routing_evidence" in questions["next_action"]["instructions"]
+    assert evidence == original
+
+
+def main_route(control, text, **kwargs):
+    control.orch.cfg.state.task = None
+    control.orch.work.items["map"] = WorkItem("map", "implementer", "Build map", status="waiting:implement")
+    return asyncio.run(control.route_turn("architect", text, {"phase": "conversation"},
+                                         allowed=("follow", "repair", "human"), **kwargs))
+
+
+def test_missing_resume_claim_repairs_at_author_even_without_quality_or_action_confidence(control):
+    result = judgment(confidence=.3, question_quality="not_question", next_action="follow")
+    result.answers["control_alignment"] = {"type": "choice", "choice": "missing", "confidence": .8}
+    client = api(control, result)
+    assert main_route(control, "map 작업을 방금 재개했습니다. 병합 후에만 배포하도록 했습니다.") == "repair"
+    state, questions = client.evaluate.call_args.args
+    assert set(questions) == {"question_quality", "next_action", "control_alignment"}
+    assert state["parsed_directives"] == []
+    assert state["parallel_work"][0]["status"] == "waiting:implement"
+    assert "same-author" in questions["control_alignment"]["instructions"]
+    assert control.orch.work.items["map"].status == "waiting:implement"
+
+
+@pytest.mark.parametrize("condition", ["low_confidence", "shadow", "unclear"])
+def test_uncertain_or_shadow_missing_control_does_not_repair(control, condition):
+    result = judgment(question_quality="not_question", next_action="follow", control_alignment="missing")
+    if condition == "low_confidence":
+        result.answers["control_alignment"]["confidence"] = .799
+    elif condition == "unclear":
+        result.answers["control_alignment"]["choice"] = "unclear"
+    else:
+        control.orch.cfg.settings["jev_mode"] = "shadow"
+    api(control, result)
+    assert main_route(control, "map을 재개했습니다.") == (None if condition == "shadow" else "follow")
+
+
+@pytest.mark.parametrize("text", ["현재 작업 보드를 확인했습니다. 추가 실행 지시는 없습니다.",
+                                  "map 작업은 이미 진행 중이고 지도 테스트는 통과했습니다.",
+                                  "어제 map을 재개했고 오늘은 결과를 요약합니다.",
+                                  "병합이 끝나면 map 작업을 재개할 계획입니다."])
+def test_status_overview_and_historical_or_future_actions_need_no_control(control, text):
+    api(control, judgment(question_quality="not_question", next_action="follow", control_alignment="consistent"))
+    assert main_route(control, text) == "follow"
+
+
+def test_real_work_block_is_exposed_as_parsed_control_not_false_missing(control):
+    client = api(control, judgment(question_quality="not_question", next_action="follow", control_alignment="consistent"))
+    text = "map-next 작업을 등록합니다.\n```duet-work\n- id: map-next\n  role: implementer\n  task: 지도 테스트 보완\n```"
+    assert main_route(control, text) == "follow"
+    state = client.evaluate.call_args.args[0]
+    assert state["canonical_work_block"] == {"present": True, "valid": True, "ids": ["map-next"], "truncated": False}
+
+
+def test_real_resume_control_is_present_for_alignment_judgment(control):
+    client = api(control, judgment(question_quality="not_question", next_action="follow", control_alignment="consistent"))
+    assert main_route(control, "map 작업을 재개합니다.\n<!-- duet: RESUME_WORK map -->",
+                      directives=[("RESUME_WORK", "map")]) == "follow"
+    assert client.evaluate.call_args.args[0]["parsed_directives"] == [["RESUME_WORK", "map"]]
+
+
+def test_active_task_does_not_request_work_board_claim_classification(control):
+    client = api(control, judgment(question_quality="not_question", next_action="follow", control_alignment="missing"))
+    assert asyncio.run(control.route_turn("architect", "계획을 검토했습니다.", control.orch.cfg.state.task,
+                                         allowed=("follow", "repair"))) == "follow"
+    assert "control_alignment" not in client.evaluate.call_args.args[1]
+
+
+def test_worker_cannot_use_unrequested_missing_control_answer_to_route(control):
+    client = api(control, judgment(question_quality="not_question", next_action="follow", control_alignment="missing"))
+    assert route(control, text="Implementation report.") == "follow"
+    assert "control_alignment" not in client.evaluate.call_args.args[1]
+
+
+@pytest.mark.parametrize("alignment,confidence,clarify", [("missing", .79, True), ("unclear", .3, True),
+                                                        ("unclear", .99, True), ("consistent", .3, False),
+                                                        ("consistent", .99, False)])
+def test_uncertain_execution_claim_can_request_clarification_without_a_route(control, alignment, confidence, clarify):
+    result = judgment(question_quality="not_question", next_action="follow", control_alignment=alignment)
+    result.answers["next_action"]["confidence"] = .3
+    result.answers["control_alignment"]["confidence"] = confidence
+    api(control, result)
+
+    async def run():
+        control.orch.cfg.state.task = None
+        assert await control.route_turn("architect", "map을 이번 턴에서 재개했습니다.", {"phase": "conversation"},
+                                        allowed=("follow", "repair")) is None
+        assert control.needs_control_clarification() is clarify
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("guard", ["shadow", "low_quality", "control", "work_block", "api_error", "stale"])
+def test_execution_claim_clarification_requires_fresh_evidence_without_existing_control(control, guard):
+    result = judgment(question_quality="not_question", next_action="follow", control_alignment="missing")
+    result.answers["next_action"]["confidence"] = .3
+    result.answers["control_alignment"]["confidence"] = .79
+    if guard == "shadow":
+        control.orch.cfg.settings["jev_mode"] = "shadow"
+    elif guard == "low_quality":
+        result.answers["question_quality"]["confidence"] = .79
+    elif guard == "api_error":
+        result = JevResult(error="timeout")
+
+    async def evaluate(state, questions):
+        if guard == "stale":
+            control.orch.inbox.put_nowait((None, "Stop map execution."))
+        return result
+
+    api(control, side_effect=evaluate)
+
+    async def run():
+        control.orch.cfg.state.task = None
+        text = "map을 이번 턴에서 재개했습니다."
+        if guard == "work_block":
+            text = "```duet-work\n- id: map\n  role: implementer\n  task: Map\n```"
+        await control.route_turn("architect", text, {"phase": "conversation"}, allowed=("follow", "repair"),
+                                 directives=[("RESUME_WORK", "map")] if guard == "control" else [])
+        assert not control.needs_control_clarification()
+
+    asyncio.run(run())
+
+
+def test_clarification_flag_is_reset_at_next_turn_even_when_jev_is_disabled(control):
+    result = judgment(question_quality="not_question", next_action="follow", control_alignment="missing")
+    result.answers["control_alignment"]["confidence"] = .79
+    result.answers["next_action"]["confidence"] = .3
+    api(control, result)
+
+    async def run():
+        control.orch.cfg.state.task = None
+        await control.route_turn("architect", "map을 재개했습니다.", {"phase": "conversation"}, allowed=("follow", "repair"))
+        assert control.needs_control_clarification()
+        control.orch.cfg.settings["jev_mode"] = "off"
+        assert await control.route_turn("architect", "Summary", allowed=("follow", "repair")) is None
+        assert not control.needs_control_clarification()
+
+    asyncio.run(run())
 
 
 def test_api_error_falls_back_and_logs_the_failure(control):

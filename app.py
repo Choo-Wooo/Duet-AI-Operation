@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from .core.config import Config, default_roles, detect_clis, ensure_preset_roles
+from .core.config import Config, default_roles, detect_clis, ensure_preset_roles, ensure_research_roles
 from .core.dialogue import Dialogue
 from .core.events import EventBus
 from .core.gitops import Git
@@ -17,6 +17,7 @@ from .core.saves import format_saves, list_saves
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="duet", description="Claude Code × Codex × Antigravity 오케스트레이터")
     p.add_argument("--mode", help="대화 모드 (sprint, review, deliberate, …)")
+    p.add_argument("--workflow", choices=("development", "research"), help="작업 모드: 개발 또는 연구 (새 요청 전에 선택)")
     p.add_argument("--max-turns", help="요청당 턴 한도 (숫자 또는 inf)")
     p.add_argument("--budget-usd", type=float, help="비용 한도(선택, 기본 없음)")
     p.add_argument("--max-hours", type=float, help="시간 한도(선택, 기본 없음)")
@@ -78,6 +79,9 @@ def setup_project(duet_dir: Path, project: Path, fake: bool) -> tuple[Config, li
     cfg.load()
     # 기존 프로젝트에 없는 기본 역할(디자이너·리서처)을 한 번 채워 넣는다
     msgs.extend(ensure_preset_roles(cfg, {"claude": 1, "codex": 1, "agy": 1} if fake else clis))
+    added_research = ensure_research_roles(cfg)
+    if added_research:
+        msgs.append("연구 모드 역할을 추가했습니다: " + ", ".join(added_research))
     if not fake:
         used = sorted({r.cli for r in cfg.roles.values()})
         missing = [c for c in used if c not in clis]
@@ -205,6 +209,18 @@ def main(duet_dir: Path, project: Path, argv: list[str]) -> int:
         cfg.state.reviewer_sessions.clear()
         cfg.state.fork_on_resume.clear()
         cfg.state.reviewer_fork_on_resume.clear()
+    if args.workflow and args.workflow != cfg.state.workflow:
+        from .console import ConsoleUI
+        from .core.orchestrator import Orchestrator
+        workflow_bus = EventBus()
+        try:
+            workflow_orch = Orchestrator(cfg, workflow_bus, ConsoleUI(), fake=args.fake)
+            msgs.append(workflow_orch.set_workflow(args.workflow))
+        except ValueError as e:
+            print(f"[duet] {e}")
+            return 2
+        finally:
+            workflow_bus.close()
     if args.mode:
         if args.mode not in cfg.modes:
             print(f"[duet] 모드는 {', '.join(cfg.modes)} 중 하나입니다.")

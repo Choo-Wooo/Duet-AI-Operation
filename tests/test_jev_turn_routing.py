@@ -1,6 +1,13 @@
 """Semantic routes preserve author, phase, human gates and existing review checks."""
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
+from duet.adapters.base import TurnResult
+from duet.core.dialogue import Turn
+from duet.core.turn_routing import TurnRouter
+from duet.core.work import REPORT_TRIGGER, WorkItem
 
 from duet.tests.test_agreement import PLAN, advance, agreed, orch, start, submit_plan
 
@@ -8,6 +15,7 @@ from duet.tests.test_agreement import PLAN, advance, agreed, orch, start, submit
 def routing(orch, action):
     orch.cfg.settings.update(jev_mode='on', jev_flow=True)
     orch.jev.route_turn = AsyncMock(return_value=action)
+    orch.jev.route_blocker = AsyncMock(return_value=None)
     orch.jev.handoff = AsyncMock(return_value=None)
     return orch.jev.route_turn
 
@@ -157,6 +165,10 @@ def test_explicit_blocked_and_deviation_never_offer_review_or_continue(orch):
             from duet.adapters.base import TurnResult
             text = '<!-- duet: REPORT ' + report + ' -->'
             await orch.turn_router.route('implementer', 'implement', TurnResult(text), Turn('implementer', 1, '', 0, 0, text))
+            if report.startswith('blocked'):
+                orch.jev.route_blocker.assert_awaited_once()
+                route.assert_not_awaited()
+                continue
             allowed = route.call_args.kwargs['allowed']
             assert 'review' not in allowed and 'continue' not in allowed
     asyncio.run(run())
@@ -197,4 +209,192 @@ def test_question_cannot_be_overridden_by_implementation_handoff(orch):
         assert await advance(orch, 'implementer', '<!-- duet: ASK_HUMAN 배포 비용을 승인할까요? -->', 'implement') is None
         assert not {'continue', 'review'} & set(route.call_args.kwargs['allowed'])
         assert orch.cfg.state.task['phase'] == 'implement' and orch.cfg.state.task['waiting']
+    asyncio.run(run())
+
+
+def recorded_response(orch, document, response, *, full_text=None):
+    async def write(ad, prompt):
+        orch.dialogue.append_turn(ad.role.name, orch._active_turn_n, document)
+        return TurnResult(response, full_text=full_text or response)
+    return write
+
+
+def test_missing_resume_control_repairs_author_before_any_classification_or_execution(orch):
+    async def run():
+        route = routing(orch, None)  # An outage or low confidence cannot allow a mismatched command.
+        orch.work.schedule = Mock()
+        item = WorkItem('map', 'implementer', '지도 구현', status='waiting:implement')
+        orch.work.items[item.id] = item
+        command = '<!-- duet: RESUME_WORK map 배포를 별도 작업으로 분리하고 구현을 마치세요 -->'
+        nxt = await advance(orch, 'architect', recorded_response(orch, '지도 작업을 재개했습니다.', command))
+        assert nxt[:2] == ('architect', 'system')
+        assert '일치하지 않습니다' in nxt[2]
+        assert item.status == 'waiting:implement' and not item.inbox
+        route.assert_not_awaited()
+        route.return_value = 'follow'
+        assert await advance(orch, 'architect', command) is None
+        assert item.status == 'queued'
+        assert len(item.inbox) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(('document', 'response'), [
+    ('<!-- duet: RESUME_WORK map -->', '<!-- duet: CANCEL_WORK map 삭제 -->'),
+    ('<!-- duet: RESUME_WORK map 기존 설계 유지 -->', '<!-- duet: RESUME_WORK map 새 설계로 변경 -->'),
+    ('<!-- duet: ASK_HUMAN 운영 데이터 삭제를 승인하나요? -->', '<!-- duet: STATUS done -->'),
+    ('작업을 등록했습니다.', '```duet-work\n- id: map\n  role: implementer\n  task: 지도 구현\n```'),
+    ('```duet-work\n- id: map\n  role: implementer\n  task: 지도 구현\n```',
+     '```duet-work\n- id: map\n  role: implementer\n  task: 운영 데이터 삭제\n```'),
+])
+def test_source_mismatch_requires_repair(document, response):
+    assert TurnRouter._source_issue(TurnResult(response), Turn('architect', 1, '', 0, 0, document))
+
+
+@pytest.mark.parametrize(('document', 'response', 'full_text'), [
+    ('<!-- duet: RESUME_WORK map -->', 'DIALOGUE에 기록했습니다.', '<!-- duet: CANCEL_WORK map 예전 초안 -->'),
+    ('<!-- duet: RESUME_WORK map -->', '<!-- duet: RESUME_WORK map -->', '<!-- duet: CANCEL_WORK map 예전 초안 -->'),
+    ('완료했습니다.', '예시:\n```html\n<!-- duet: CANCEL_WORK map 예시 -->\n```', None),
+    ('완료했습니다.', '> <!-- duet: CANCEL_WORK map 예시 -->', None),
+    ('```duet-work\n- id: map\n  task: 지도 구현\n```', 'DIALOGUE에 작업을 기록했습니다.', None),
+    ('```duet-work\n- id: map\n  task: 지도 구현\n```', '```duet-work\n- {task: 지도 구현, id: map}\n```', None),
+])
+def test_source_comparison_allows_acknowledgments_examples_and_equivalent_controls(document, response, full_text):
+    assert not TurnRouter._source_issue(TurnResult(response, full_text=full_text),
+                                       Turn('architect', 1, '', 0, 0, document))
+
+
+def test_source_repair_exhaustion_never_creates_a_design_question(orch):
+    async def run():
+        await agreed(orch)
+        routing(orch, None)
+        orch.cfg.settings['design_questions'] = True
+        orch.design.state['phase'] = 'active'
+        orch.design.defer = Mock()
+        for _ in range(2):
+            nxt = await advance(orch, 'implementer', recorded_response(
+                orch, '보고를 마쳤습니다.', '<!-- duet: REPORT done -->'), 'implement')
+            assert nxt[:2] == ('implementer', 'implement')
+        assert await advance(orch, 'implementer', recorded_response(
+            orch, '보고를 마쳤습니다.', '<!-- duet: REPORT done -->'), 'implement') is None
+        assert orch.cfg.state.task['phase'] == 'implement'
+        assert orch.cfg.state.task['waiting']
+        orch.design.defer.assert_not_called()
+        assert not any(e.kind == 'ask' for e in orch.events)
+    asyncio.run(run())
+
+
+def test_source_repair_keeps_existing_human_wait(orch):
+    async def run():
+        await agreed(orch)
+        routing(orch, None)
+        orch._wait_task('운영 데이터 삭제에 대한 실제 사용자 승인 대기')
+        reason = orch.cfg.state.task['wait_reason']
+        nxt = await advance(orch, 'architect', recorded_response(
+            orch, '작업을 재개합니다.', '<!-- duet: RESUME -->'))
+        assert nxt[:2] == ('architect', 'implement')
+        assert orch.cfg.state.task['waiting']
+        assert orch.cfg.state.task['wait_reason'] == reason
+    asyncio.run(run())
+
+
+def test_both_sources_are_provided_but_intermediate_controls_are_not_evidence(orch):
+    async def run():
+        route = routing(orch, 'follow')
+        await advance(orch, 'architect', recorded_response(
+            orch, '완료했습니다.\n<!-- duet: STATUS done -->', 'DIALOGUE에 기록했습니다.',
+            full_text='<!-- duet: CANCEL_WORK map 오래된 초안 -->'))
+        evidence = route.call_args.kwargs['evidence']
+        assert evidence['response_text'] == 'DIALOGUE에 기록했습니다.'
+        assert 'STATUS done' in evidence['dialogue_text']
+        assert 'CANCEL_WORK' not in str(evidence)
+        await advance(orch, 'architect', TurnResult('<!-- duet: STATUS done -->',
+                                                  full_text='<!-- duet: CANCEL_WORK map 오래된 초안 -->\n<!-- duet: STATUS done -->'))
+        assert route.call_args.args[1] == '<!-- duet: STATUS done -->'
+    asyncio.run(run())
+
+
+def test_internal_report_arriving_during_route_does_not_drop_completed_turn(orch):
+    async def run():
+        await agreed(orch)
+        route = routing(orch, 'review')
+        async def report(*args, **kwargs):
+            orch.inbox.put_nowait((None, REPORT_TRIGGER))
+            return 'review'
+        route.side_effect = report
+        nxt = await advance(orch, 'implementer', '<!-- duet: REPORT done -->', 'implement')
+        assert nxt[:2] == ('architect', 'verify')
+        assert orch.cfg.state.task['phase'] == 'verify'
+        assert not orch.inbox.empty()
+    asyncio.run(run())
+
+
+def test_new_user_input_retains_discarded_control_for_reevaluation(orch):
+    async def run():
+        await agreed(orch)
+        route = routing(orch, 'review')
+        orch.defer_control_turn = Mock()
+        async def user(*args, **kwargs):
+            orch.inbox.put_nowait((None, '잠시 기다려'))
+            return 'review'
+        route.side_effect = user
+        assert await advance(orch, 'implementer', '<!-- duet: REPORT done -->', 'implement') is None
+        assert orch.cfg.state.task['phase'] == 'implement'
+        args = orch.defer_control_turn.call_args.args
+        assert args[:2] == ('implementer', 'implement')
+        assert args[2].directive('REPORT') == 'done'
+    asyncio.run(run())
+
+
+def test_blocked_report_without_question_reaches_architect_then_same_worker(orch):
+    async def run():
+        await agreed(orch)
+        route = routing(orch, 'follow')
+        orch.jev.route_blocker.return_value = 'architect'
+        report = '<!-- duet: REPORT blocked 병합 전에는 운영 배포를 실행할 수 없습니다 -->'
+        nxt = await advance(orch, 'implementer', report, 'implement')
+        assert nxt[:2] == ('architect', 'jev_consult')
+        assert '병합 전에는 운영 배포' in nxt[2]
+        assert not orch.cfg.state.task['waiting']
+        route.assert_not_awaited()
+        nxt = await advance(orch, 'architect', '배포는 병합 이후 별도 작업으로 진행하고 현재 합의 범위의 구현·검증을 마치세요.', 'jev_consult')
+        assert nxt[:2] == ('implementer', 'implement')
+        assert orch.cfg.state.task['phase'] == 'implement'
+        assert not any(e.kind == 'ask' for e in orch.events)
+    asyncio.run(run())
+
+
+def test_blocker_user_ownership_preserves_real_human_wait(orch):
+    async def run():
+        await agreed(orch)
+        routing(orch, 'follow')
+        orch.cfg.settings['design_questions'] = True
+        orch.design.state['phase'] = 'active'
+        orch.jev.route_blocker.return_value = 'human'
+        assert await advance(orch, 'implementer', '<!-- duet: REPORT blocked 운영 데이터 삭제에 대한 사용자 승인이 필요합니다 -->', 'implement') is None
+        assert orch.cfg.state.task['waiting']
+        assert orch.design.blocked('implementer')
+        assert '운영 데이터 삭제' in orch.cfg.state.task['wait_reason']
+    asyncio.run(run())
+
+
+def test_blocker_uncertainty_and_dependency_never_create_user_owned_questions(orch):
+    async def run():
+        await agreed(orch)
+        routing(orch, 'follow')
+        orch.cfg.settings['design_questions'] = True
+        orch.design.state['phase'] = 'active'
+        orch.design.defer = Mock()
+        report = '<!-- duet: REPORT blocked 선행 작업이 필요합니다 -->'
+        for _ in range(2):
+            nxt = await advance(orch, 'implementer', report, 'implement')
+            assert nxt[:2] == ('implementer', 'implement')
+        assert await advance(orch, 'implementer', report, 'implement') is None
+        assert orch.cfg.state.task['waiting']
+        orch.design.defer.assert_not_called()
+        orch.cfg.state.task['waiting'] = False
+        orch.jev.route_blocker.return_value = 'dependency'
+        assert await advance(orch, 'implementer', '<!-- duet: REPORT blocked 지도 선행 작업 병합 대기 -->', 'implement') is None
+        assert orch.cfg.state.task['waiting']
+        orch.design.defer.assert_not_called()
+        assert not any(e.kind == 'ask' for e in orch.events)
     asyncio.run(run())

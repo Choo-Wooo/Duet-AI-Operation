@@ -6,7 +6,7 @@ import pytest
 
 from duet.console import ConsoleUI
 import yaml
-from duet.core.config import DEFAULT_POLICY, Role
+from duet.core.config import DEFAULT_POLICY, Config, Role
 from duet.core.policy import ARCHITECT, AUTO, DENY, HUMAN, ApprovalRequest, Policy, writes_output
 
 
@@ -127,13 +127,15 @@ def test_full_command_cache(policy):
     "sub/.env.local", "secrets/a", "sub/secrets/a", ".GIT/config", "x/../key.PEM",
 ])
 def test_protected_paths_and_cache(tmp_path, source, path):
-    project_policy = Path(__file__).resolve().parents[2] / ".duet/policy.yaml"
     if source == "default":
         conf = DEFAULT_POLICY
-    elif project_policy.exists():
-        conf = yaml.safe_load(project_policy.read_text(encoding="utf-8"))
-    else:  # 새로 받은 저장소(CI 등): duet 이 저장하는 형태 그대로 왕복
-        conf = yaml.safe_load(yaml.safe_dump(DEFAULT_POLICY, allow_unicode=True))
+    else:
+        # Exercise the generated project policy without reading the developer's
+        # personal parent-directory policy, which may intentionally differ.
+        cfg = Config(tmp_path)
+        cfg.dir.mkdir()
+        cfg.save_policy()
+        conf = yaml.safe_load(cfg.policy_file.read_text(encoding="utf-8"))
     pol = Policy(tmp_path, conf, "architect")
     req = ApprovalRequest("implementer", "file", path, paths=[path])
     pol.remember(req)

@@ -112,6 +112,7 @@ class WorkItem:
     files_hint: list[str] = field(default_factory=list)
     status: str = "queued"
     wait_reason: str = ""
+    wait_kind: str = ""  # human / architect / dependency / system; empty for legacy records
     batch: int = 0
     from_turn: int = 0
     plan: str = ""
@@ -255,6 +256,7 @@ class WorkBoard:
                 it.wait_reason = (f"duet 재시작으로 {it.status} 단계에서 멈춤 — "
                                   f"작업 보드 또는 /work resume {it.id} 로 재개{previous_reason}")
                 it.status = "waiting:" + phase
+                it.wait_kind = "system"
             # Loading history is not a new work event. Otherwise start() reports
             # every old completion/wait to the main agent, which can resume old
             # work without any input. A later explicit resume/status change
@@ -270,11 +272,12 @@ class WorkBoard:
         except OSError as e:
             self.orch.bus.emit('notice', None, text=f'work.json 저장 실패: {e}', level='warn')
 
-    def _touch(self, it: WorkItem, status: str | None = None, reason: str = "") -> None:
+    def _touch(self, it: WorkItem, status: str | None = None, reason: str = "", *, wait_kind: str = "") -> None:
         if status:
             old = it.status
             it.status = status
             it.wait_reason = reason
+            it.wait_kind = wait_kind if status.startswith("waiting") or status == "blocked" else ""
             if old != status:
                 it.__dict__.pop("_reported", None)
                 self.orch.bus.emit("work", it.role + "#" + it.id, id=it.id, status=status, reason=reason)
@@ -298,6 +301,7 @@ class WorkBoard:
         out = []
         for i in sorted(self.items.values(), key=lambda x: x.created):
             out.append({"id": i.id, "role": i.role, "task": i.task, "status": i.status, "wait_reason": i.wait_reason,
+                        "wait_kind": i.wait_kind,
                         "depends_on": i.depends_on, "batch": i.batch, "agreed_files": i.agreed_files,
                         "test_command": i.test_command, "thread": i.thread, "merged_commit": i.merged_commit,
                         "rounds": i.rounds, "reworks": i.reworks, "updated": i.updated,
@@ -309,9 +313,10 @@ class WorkBoard:
         items = [i for i in self.items.values() if batch is None or i.batch == batch]
         lines = []
         for i in items:
+            owner = f" · 대기 담당 {i.wait_kind}" if i.wait_kind else ""
             extra = f" ({i.wait_reason})" if i.wait_reason else ""
             commit = f" · 커밋 {i.merged_commit[:9]}" if i.merged_commit else ""
-            lines.append(f"- {i.id} [{i.role}] {i.status}{commit}{extra} — 기록 {i.thread}"
+            lines.append(f"- {i.id} [{i.role}] {i.status}{commit}{owner}{extra} — 기록 {i.thread}"
                          + (f"\n  결과: {i.result}" if i.result else ""))
         return "\n".join(lines) or "(작업 없음)"
 
@@ -401,20 +406,39 @@ class WorkBoard:
         return any(visit(n) for n in graph)
 
     def handle_directives(self, directives: list[tuple[str, str]]) -> list[str]:
+        return [receipt["reason"] for receipt in self.handle_directives_receipts(directives)]
+
+    def handle_directives_receipts(self, directives: list[tuple[str, str]]) -> list[dict]:
+        """Record whether each requested operation really changed the work state."""
         out = []
         for k, v in directives:
+            if k not in ("CANCEL_WORK", "RESUME_WORK"):
+                continue
+            wid, _, text = v.strip().partition(" ")
+            it = self.items.get(wid)
+            before = it.status if it else None
             if k == "CANCEL_WORK":
-                wid, _, why = v.partition(" ")
-                out.append(self.cancel(wid, why or "설계자 취소"))
-            elif k == "RESUME_WORK":
-                wid, _, text = v.partition(" ")
-                if wid in self.items and getattr(self.orch, "design", None) and self.orch.design.blocked(self.items[wid].role + "#" + wid):
-                    out.append(f"{wid}: 실제 사용자 설계 답변 전에는 재개할 수 없습니다")
-                    continue
-                if text.strip() and wid in self.items:  # 대기 사유(질문)에 대한 답을 함께 전달
-                    self.items[wid].inbox.append(f"설계자: {text.strip()}")
-                    self._thread(self.items[wid], "설계자", text.strip())
-                out.append(self.resume(wid))
+                reason = self.cancel(wid, text or "설계자 취소")
+                accepted = it is not None and before not in DONE and it.status == "cancelled"
+            else:
+                design = getattr(self.orch, "design", None)
+                if it and design and design.blocked(it.role + "#" + wid):
+                    reason = f"{wid}: 실제 사용자 설계 답변 전에는 재개할 수 없습니다"
+                    accepted = False
+                elif it and it.wait_kind == "human" and not (design and design.enabled):
+                    reason = f"{wid}: 실제 사용자 답변 전에는 재개할 수 없습니다"
+                    accepted = False
+                else:
+                    # Only deliver the architect's message when resume can be
+                    # accepted. A rejected command must not mutate the inbox.
+                    can_resume = it is not None and it.status.startswith("waiting")
+                    if can_resume and text.strip():
+                        it.inbox.append(f"설계자: {text.strip()}")
+                        self._thread(it, "설계자", text.strip())
+                    reason = self.resume(wid)
+                    accepted = bool(can_resume and it.status != before and not it.status.startswith("waiting"))
+            out.append({"action": k, "id": wid, "accepted": accepted, "before": before,
+                        "after": it.status if it else None, "reason": reason})
         return out
 
     def cancel(self, wid: str, reason: str) -> str:
@@ -497,7 +521,7 @@ class WorkBoard:
                     f"{d} ({'missing' if d not in self.items else 'blocked' if self.items[d].status == 'queued' else self.items[d].status})"
                     for d in it.depends_on if d not in self.items or d in blocked)
                 if it.status != "blocked" or it.wait_reason != reason:
-                    self._touch(it, "blocked", reason)
+                    self._touch(it, "blocked", reason, wait_kind="dependency")
             elif it.status == "blocked":
                 self._touch(it, "queued")
         cap = int(self.cfg.settings.get("max_parallel") or 4)
@@ -510,7 +534,7 @@ class WorkBoard:
                 continue
             role = self.cfg.roles.get(it.role)
             if role is None:
-                self._touch(it, "waiting:queued", f"역할 {it.role} 이 없습니다")
+                self._touch(it, "waiting:queued", f"역할 {it.role} 이 없습니다", wait_kind="system")
                 continue
             same = sum(1 for r in running if r.role == it.role)
             if len(running) >= cap or same >= max(1, role.max_sessions):
@@ -539,6 +563,7 @@ class WorkBoard:
         self._report_pending = False
         return ("병렬 작업 보고입니다. 각 작업의 기록(docs/work/<id>.md)을 필요한 만큼 읽고, 결과를 설계와 대조해 다음 단계를 정하세요. "
                 "대기 작업은 RESUME_WORK/CANCEL_WORK 로 처리하고, 추가 작업이 있으면 새 duet-work 블록을 내세요. "
+                "대기 담당 architect/system/dependency는 원인·선행 조건을 확인해 해결하세요. human은 실제 사용자 답변이 필요합니다. "
                 "모두 끝났으면 사람에게 요약하고 STATUS done.\n\n기준 브랜치: " + str(self.base) + "\n" + self.summary())
 
     # ---------------- 기록 ----------------
@@ -649,6 +674,9 @@ class WorkBoard:
         unresolved = ""
         while True:
             self._route_guard(it)
+            entry = getattr(getattr(self.orch, "jev", None), "_log_entry", None)
+            if entry is not None:
+                entry.set(None)
             tr, full, dirs = await self._turn_once(ad, it, kind, prompt, who)
             jev = getattr(self.orch, "jev", None)
             route = getattr(jev, "route_turn", None)
@@ -657,7 +685,7 @@ class WorkBoard:
             design = getattr(self.orch, "design", None)
             if design and design.blocked(it.role + "#" + it.id):
                 self._check_ask(dirs, phase)
-                raise _Wait(phase, "중요 설계 질문에 대한 실제 사용자 답변 대기")
+                raise _Wait(phase, "중요 설계 질문에 대한 실제 사용자 답변 대기", "human")
             issue = ""
             asks = [v for k, v in dirs if k == "ASK_HUMAN"]
             controls = [(k, v) for k, v in dirs if k in
@@ -684,14 +712,34 @@ class WorkBoard:
                    (k == "REPORT" and v.split(maxsplit=1)[0:1] in (["blocked"], ["deviation"]))
                    for k, v in dirs):
                 turn_allowed = tuple(a for a in allowed if a not in ("continue", "review"))
-            action = await route(ad.label, full, {
+            task = {
                 "id": it.id, "instruction": it.task, "phase": phase,
                 "agreed_files": it.agreed_files, "test_command": it.test_command,
-            }, kind=kind, directives=dirs, issue=issue, allowed=turn_allowed)
+                "depends_on": [{"id": dep, "status": self.items[dep].status if dep in self.items else "missing"}
+                               for dep in it.depends_on],
+            }
+            blocker = next((v for k, v in dirs if k == "REPORT" and
+                            v.split(maxsplit=1)[0:1] in (["blocked"], ["deviation"])), None)
+            route_blocker = getattr(jev, "route_blocker", None)
+            blocker_routed = blocker is not None and not issue and callable(route_blocker)
+            if blocker_routed:
+                action = await route_blocker(ad.label, full, task, kind=kind, directives=dirs)
+                # Off/shadow retain ordinary technical waiting. An uncertain
+                # live decision asks the author to supply missing evidence.
+                live = getattr(jev, "mode", "off") == "on" and jev.enabled("flow")
+                if action is None and live:
+                    action = "repair"
+                turn_allowed = ("architect", "human", "dependency", "repair")
+            else:
+                action = await route(ad.label, full, task, kind=kind, directives=dirs,
+                                     issue=issue, allowed=turn_allowed)
             self._route_guard(it)
             if not self.orch.not_paused.is_set():
                 raise _Wait(phase, "JEV 판단 중 작업이 일시정지되었습니다.")
-            if not self.orch.inbox.empty() or tuple(it.inbox) != prior_input:
+            pending = getattr(self.orch, "has_pending_user_input", None)
+            new_input = (pending() if callable(pending) else
+                         any(text != REPORT_TRIGGER for _, text in self.orch.inbox._queue))
+            if new_input or tuple(it.inbox) != prior_input:
                 raise _Wait(phase, "새 사용자·설계자 입력이 도착했습니다. 입력을 반영한 뒤 재개하세요.")
             if action is None or action not in turn_allowed:
                 if repairs:
@@ -704,9 +752,13 @@ class WorkBoard:
                                  for k, v in dirs if k in ("ASK_HUMAN", "CONSULT")) or full
             if action == "human":
                 return tr, full, [("ASK_HUMAN", "\n".join(asks) or full)]
+            if action == "dependency":
+                raise _Wait(phase, "선행 조건 대기: " + full, "dependency")
             if action == "architect" and worker:
                 # A technical question can be discussed, but no answer is invented.
                 return tr, full, [("CONSULT", "architect " + question)]
+            if action == "architect":
+                raise _Wait(phase, "설계자 조정 필요: " + full, "architect")
             if action == "review":
                 blocked = any(k in ("ASK_HUMAN", "CONSULT") or
                               (k == "REPORT" and v.split(maxsplit=1)[0:1] in (["blocked"], ["deviation"]))
@@ -719,7 +771,10 @@ class WorkBoard:
                 if repairs >= MAX_ROUTE_REPAIRS:
                     raise _Wait(phase, "JEV 질문·응답 보완 한도 — 원문: " + unresolved)
                 repairs += 1
-                note = ("JEV 관제: 질문 또는 응답의 형식을 보완하세요. 질문은 누구에게 어떤 결정을 요청하는지, "
+                note = ("JEV 관제: 막힘의 원인과 필요한 선행 조건, 이미 확인한 근거, 설계자가 조정할 부분과 "
+                        "실제 사용자만 결정할 부분을 구분해 보고하세요. 모르는 내용을 임의로 답하지 마세요. "
+                        if blocker_routed else
+                        "JEV 관제: 질문 또는 응답의 형식을 보완하세요. 질문은 누구에게 어떤 결정을 요청하는지, "
                         "선택지·추천안·영향을 구체적으로 쓰세요. 이미 답변된 내용을 다시 묻지 마세요. "
                         "사람의 답을 대신 결정하거나 완료를 꾸미지 마세요. "
                         if action == "repair" else
@@ -773,6 +828,11 @@ class WorkBoard:
         return it.conventions
 
     async def _run(self, it: WorkItem) -> None:
+        # asyncio tasks inherit ContextVars from their parent. A wait before a
+        # work decision must never be appended to the main agent's judgment.
+        entry = getattr(getattr(self.orch, "jev", None), "_log_entry", None)
+        if entry is not None:
+            entry.set(None)
         try:
             self._conventions(it)
             assert self.wt and self.base
@@ -783,11 +843,21 @@ class WorkBoard:
         except asyncio.CancelledError:
             raise
         except _Wait as w:
-            self._touch(it, "waiting:" + w.phase, w.reason)
-            if getattr(self.orch, "design", None) and self.orch.design.enabled:
-                self.orch.design.defer(it.role + "#" + it.id, w.reason)
+            before = {"id": it.id, "status": it.status, "wait_kind": it.wait_kind}
+            self._touch(it, "waiting:" + w.phase, w.reason, wait_kind=w.kind)
+            if w.kind == "human":
+                if getattr(self.orch, "design", None) and self.orch.design.enabled:
+                    self.orch.design.defer(it.role + "#" + it.id, w.reason)
+                else:
+                    self.orch.bus.emit("ask", it.role + "#" + it.id, text=f"[{it.id}] {w.reason}")
             else:
-                self.orch.bus.emit("ask", it.role + "#" + it.id, text=f"[{it.id}] {w.reason}")
+                self.orch.notice(f"[{it.id}] {w.kind} 대기: {w.reason}")
+            self._thread(it, "duet · 대기", f"담당: {w.kind}\n{w.reason}")
+            recorder = getattr(self.orch, "record_control_outcome", None)
+            if callable(recorder):
+                recorder(w.kind, "work_wait", role=it.role + "#" + it.id, applied=True,
+                         before=before, after={"id": it.id, "status": it.status, "wait_kind": it.wait_kind},
+                         reason=w.reason)
         except Exception as e:
             self._touch(it, "failed", f"{type(e).__name__}: {e}")
             self._thread(it, "duet", f"작업 실패: {e}")
@@ -817,9 +887,7 @@ class WorkBoard:
         while True:
             # One submission (valid or invalid) plus its review is one negotiation.
             if it.negotiations >= it.negotiation_limit:
-                if not (getattr(self.orch, "design", None) and self.orch.design.enabled):
-                    self.orch.bus.emit('ask', it.role, text=f'{it.id}: 협상 6회 한도 — 사람 응답/RESUME_WORK 필요')
-                raise _Wait('plan', '협상 6회 한도 — 사람 응답/RESUME_WORK 필요')
+                raise _Wait('plan', '협상 6회 한도 — 설계자 검토/RESUME_WORK 필요', "architect")
             it.negotiations += 1
             self._touch(it, "plan")
             worker = await self._worker(it, path)
@@ -873,7 +941,7 @@ class WorkBoard:
                     await self._baseline(it, path)
                     return
                 if choice != "more":
-                    raise _Wait("plan_review", "계획 합의 라운드 한도 — 사람 보류")
+                    raise _Wait("plan_review", "계획 합의 라운드 한도 — 사람 보류", "human")
                 limit += 1
             feedback = rev or "설계자가 AGREE 하지 않았습니다. 응답을 읽고 계획을 고치세요."
 
@@ -921,8 +989,8 @@ class WorkBoard:
             tr, full, dirs = await self._consultable(worker, it, "work_implement", prompt, path)
             self._check_ask(dirs, "implement")
             report = next((v for k, v in dirs if k == "REPORT"), "")
-            if report.startswith("blocked"):
-                raise _Wait("implement", "작업자 보고: " + report)
+            if report.startswith(("blocked", "deviation")):
+                raise _Wait("implement", "작업자 보고: " + report, "architect")
             if not report.startswith("done"):
                 note = "REPORT done 지시문이 없습니다. 작업을 마쳤으면 보고와 함께 REPORT done 을 쓰세요."
                 it.reworks += 1
@@ -967,7 +1035,7 @@ class WorkBoard:
                 choice = await self.orch.ui.ask_choice(f"[{it.id}] 재작업 한도", note[-1500:],
                                                        [("more", "계속"), ("wait", "보류")])
                 if choice != "more":
-                    raise _Wait("implement", "재작업 한도 — 사람 보류")
+                    raise _Wait("implement", "재작업 한도 — 사람 보류", "human")
                 it.reworks = 0
 
     async def _run_test(self, it: WorkItem, path: Path, command: str) -> tuple[int, str]:
@@ -1088,7 +1156,7 @@ class WorkBoard:
                 c = await self.orch.ui.ask_choice(f"[{it.id}] 기준 브랜치 {self.base} 에 병합할까요?", stat,
                                                   [("merge", "병합"), ("hold", "보류")])
                 if c != "merge":
-                    raise _Wait("merging", "사람이 병합을 보류함")
+                    raise _Wait("merging", "사람이 병합을 보류함", "human")
             try:
                 sha = await asyncio.to_thread(self._snapshot_and_squash, it)
             except GitError as e:
@@ -1139,7 +1207,24 @@ class WorkBoard:
                 raise _Wait(it.status, f"협의 한도({MAX_CONSULTS}회) — 마지막 질문: {question}")
             it.consults += 1
             self.save()
+            recorder = getattr(self.orch, "record_control_outcome", None)
+            entry = getattr(getattr(self.orch, "jev", None), "_log_entry", None)
+            origin = entry.get() if entry is not None else None
+            action = "architect" if target in ("architect", self.cfg.main) else "consult"
+            if callable(recorder):
+                recorder(action, "work_consult_requested", role=ad.label, applied=False,
+                         reason=f"{it.id} → {target}: {question}")
             answer = await self._answer(it, target, question, path)
+            if callable(recorder):
+                # The nested answer has its own routing decision. Record this
+                # successful consultation against the requesting decision only.
+                token = entry.set(origin) if entry is not None else None
+                try:
+                    recorder(action, "work_consult", role=ad.label, applied=True,
+                             reason=f"{it.id} ← {target}: 협의 답변 수신")
+                finally:
+                    if token is not None:
+                        entry.reset(token)
             tr, full, dirs = await self._turn(ad, it, kind, f"[duet] CONSULT 답변\n{answer}\n\n{prompt}", who)
 
     async def _answer(self, it: WorkItem, target: str, question: str, path: Path) -> str:
@@ -1194,7 +1279,7 @@ class WorkBoard:
     def _check_ask(dirs: list[tuple[str, str]], phase: str) -> None:
         questions = [v or "(내용 없음)" for k, v in dirs if k == "ASK_HUMAN"]
         if questions:
-            raise _Wait(phase, "사람에게 질문: " + "\n".join(questions))
+            raise _Wait(phase, "사람에게 질문: " + "\n".join(questions), "human")
 
     # ---------------- 종료 ----------------
     async def close(self) -> None:
@@ -1212,6 +1297,7 @@ class WorkBoard:
                 self._save_sessions(it)
                 it.wait_reason = f"duet 종료로 {it.status} 단계에서 멈춤 — RESUME_WORK {it.id} 로 재개"
                 it.status = "waiting:" + it.status
+                it.wait_kind = "system"
         for key in list(self.adapters):
             ad = self.adapters.pop(key)
             try:
@@ -1222,6 +1308,6 @@ class WorkBoard:
 
 
 class _Wait(Exception):
-    def __init__(self, phase: str, reason: str):
+    def __init__(self, phase: str, reason: str, kind: str = "system"):
         super().__init__(reason)
-        self.phase, self.reason = phase, reason
+        self.phase, self.reason, self.kind = phase, reason, kind

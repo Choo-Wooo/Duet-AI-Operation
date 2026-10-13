@@ -62,6 +62,10 @@ async def evaluate_cases(cases, source: Config, *, client_factory=JevClient):
                                started=time.time(), bus=EventBus(), notice=lambda *args: None,
                                emit_status=lambda: None)
         for case in cases:
+            cfg.state.workflow = "research" if case["kind"] == "research" else "development"
+            cfg.state.research = case.get("context", {}) if case["kind"] == "research" else {}
+            orch.work.items = {item["id"]: SimpleNamespace(updated=0, **item)
+                               for item in case.get("parallel_work", [])}
             control = JevControl(orch)
             # Credentials never enter synthetic state or project files.
             control.client_factory = lambda ignored, **kwargs: client_factory(key, **kwargs)
@@ -93,6 +97,17 @@ async def evaluate_cases(cases, source: Config, *, client_factory=JevClient):
                     directives=[tuple(d) for d in case.get("directives", [])],
                     issue=case.get("issue", ""), allowed=tuple(case["allowed"]))
                 # Abstention is visible as a miss, not silently relabeled as the expected action.
+                actual = result or ("clarify" if control.needs_control_clarification() else "refer")
+            elif case["kind"] == "blocker":
+                result = await control.route_blocker(
+                    role, case["report"], cfg.state.task, kind=case.get("turn_kind", "work_implement"),
+                    directives=[tuple(d) for d in case.get("directives", [])])
+                actual = result or "refer"
+            elif case["kind"] == "research":
+                result = await control.route_research(case["context"], list(case["allowed"]))
+                # Measure the moderator's choice, not the engine's recovery path.
+                # An abstention must remain visible even when fallback could
+                # subsequently choose an acceptable discussion action.
                 actual = result or "refer"
             else:
                 raise ValueError("unknown case kind")

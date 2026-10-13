@@ -67,12 +67,18 @@ PERM_TEXT = {
 def team_table(cfg: Config) -> str:
     rows = []
     for r in cfg.roles.values():
+        if r.name in ("explorer", "critic"):
+            continue
         mark = " (메인)" if r.name == cfg.main else ""
         rows.append(f"- {r.name}{mark}: {r.cli}/{r.model or '기본 모델'} — {r.brief}")
     return "\n".join(rows)
 
 
 def system_append(cfg: Config, role: Role) -> str:
+    if role.name in ("explorer", "critic"):
+        from .research import research_system_prompt
+        return (research_system_prompt(cfg, role) + "\n권한: " + PERM_TEXT.get(role.permissions, "") + "\n"
+                + BACKGROUND_WAIT + MEMORY_SYSTEM.replace("{role}", role.name))
     is_main = role.name == cfg.main
     common = f"""
 # duet 협업 규칙
@@ -116,6 +122,9 @@ def system_append(cfg: Config, role: Role) -> str:
 
 
 def turn_prompt(cfg: Config, role: Role, n: int, since: int, kind: str, info: str = "") -> str:
+    if kind == "research":
+        from .research import research_turn_prompt
+        return research_turn_prompt(cfg, role, n, since, kind, info)
     mode = cfg.mode
     lines = [f"[duet] 턴 #{n} · 역할 {role.name}", BACKGROUND_WAIT.strip()]
     if role.name == cfg.main:

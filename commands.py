@@ -12,6 +12,7 @@ HELP = """명령어
   (일반 텍스트)              메인 역할(설계자)에게 전달
   /to <역할> <메시지>        특정 역할에게 직접 전달
   /mode [이름]               대화 모드 보기/변경 (sprint, review, deliberate, autopilot=전권 자동)
+  /workflow [development|research]  개발/연구 모드 선택 (새 요청 전)
   /turns <N|inf>            이번 요청의 턴 한도 (inf = 무제한)
   /auto on|off              off 면 위임 전마다 확인
   /usage-retry on|off       사용량 한도 자동 대기·재개 (기본 꺼짐)
@@ -50,7 +51,7 @@ def _fmt_roles(orch: Orchestrator) -> str:
 def _fmt_status(orch: Orchestrator) -> str:
     s = orch.status()
     mt = "∞" if s["max_turns"] is None else s["max_turns"]
-    return (f"모드 {s['mode']}{' (전권 자동)' if s.get('full_auto') else ''} · 턴 {s['run_turns']}/{mt} · 자동위임 {'on' if s['auto'] else 'off'} · "
+    return (f"{'연구' if s.get('workflow') == 'research' else '개발'} · 모드 {s['mode']}{' (전권 자동)' if s.get('full_auto') else ''} · 턴 {s['run_turns']}/{mt} · 자동위임 {'on' if s['auto'] else 'off'} · "
             f"{'일시정지 · ' if s['paused'] else ''}실행 중 {s['running'] or '-'} · "
             f"Claude API 환산 ${s['cost_usd']:.2f} (구독이면 실제 청구 아님) · 토큰 {s['tokens']:,}" +
             (f"\n{s['task_summary']}" if s.get("task") else ""))
@@ -72,6 +73,13 @@ async def handle(orch: Orchestrator, line: str) -> str | None:
         return "세션을 불러오는 중입니다. 완료 후 다시 시도하세요."
     if cmd in ("help", "h", "?"):
         return HELP
+    if cmd == "workflow":
+        if not rest:
+            return f"작업 모드: {orch.cfg.state.workflow} — development / research"
+        try:
+            return orch.set_workflow(rest)
+        except ValueError as e:
+            return str(e)
     if cmd == "verification":
         from .core.verification import DEFAULT_VERIFICATION_LEVEL, VERIFICATION_LEVELS
         if not rest:

@@ -174,5 +174,261 @@
     "directives": [["REPORT", "done"]],
     "allowed": ["repair", "architect", "human", "continue", "review"],
     "expected": ["continue"]
+  },
+  {
+    "id": "blocker-deploy-after-merge",
+    "kind": "blocker",
+    "role": "implementer",
+    "turn_kind": "work_implement",
+    "instruction": "지도 모드의 승인된 NPC 좌표를 수정하고 배포한다. 코드 병합 후 기존 배포 절차로 운영에 적용한다.",
+    "report": "코드와 jar 및 좌표 검증은 끝났다. 워크트리에서는 운영 mods.json과 불일치하므로 병합 전 재시작은 불가능하다. 코드 작업과 병합 후 배포 작업을 나눠야 한다.",
+    "directives": [
+      [
+        "REPORT",
+        "blocked 코드와 jar 및 좌표 검증은 끝났다. 워크트리에서는 운영 mods.json과 불일치하므로 병합 전 재시작은 불가능하다. 코드 작업과 병합 후 배포 작업을 나눠야 한다."
+      ]
+    ],
+    "expected": [
+      "architect"
+    ]
+  },
+  {
+    "id": "blocker-real-user-authorization",
+    "kind": "blocker",
+    "role": "implementer",
+    "turn_kind": "work_implement",
+    "instruction": "기존 데이터를 보존하면서 저장 형식을 업그레이드한다. 삭제 승인은 없다.",
+    "report": "마이그레이션에는 운영 데이터 삭제가 필요하다. 기존 요구는 보존이므로 사용자에게 삭제를 허가받기 전에는 진행할 수 없다.",
+    "directives": [
+      [
+        "REPORT",
+        "blocked 마이그레이션에는 운영 데이터 삭제가 필요하다. 기존 요구는 보존이므로 사용자에게 삭제를 허가받기 전에는 진행할 수 없다."
+      ]
+    ],
+    "expected": [
+      "human"
+    ]
+  },
+  {
+    "id": "blocker-known-dependency",
+    "kind": "blocker",
+    "role": "implementer",
+    "turn_kind": "work_implement",
+    "instruction": "승인된 선행 작업 schema-v2 병합 뒤에 migration을 실행한다. 작업 순서는 이미 합의됐다.",
+    "report": "schema-v2 작업이 아직 실행 중이다. 그 병합을 기다려야 하며 새 결정이나 추가 권한은 필요하지 않다.",
+    "directives": [
+      [
+        "REPORT",
+        "blocked schema-v2 작업이 아직 실행 중이다. 그 병합을 기다려야 하며 새 결정이나 추가 권한은 필요하지 않다."
+      ]
+    ],
+    "expected": [
+      "dependency"
+    ]
+  },
+  {
+    "id": "blocker-vague-report",
+    "kind": "blocker",
+    "role": "implementer",
+    "turn_kind": "work_implement",
+    "instruction": "현재 합의한 테스트를 통과시키고 결과를 보고한다.",
+    "report": "안 돼요. 막혔어요.",
+    "directives": [
+      [
+        "REPORT",
+        "blocked 안 돼요. 막혔어요."
+      ]
+    ],
+    "expected": [
+      "repair"
+    ]
+  },
+  {
+    "id": "route-main-missing-resume-control",
+    "expected_fallback": "clarify",
+    "parallel_work": [{"id": "map", "role": "implementer", "status": "waiting:implement", "task": "지도 코드를 구현하고 병합 후 배포한다."}],
+    "kind": "route",
+    "role": "architect",
+    "phase": "conversation",
+    "instruction": "map 작업을 재개하되 운영 배포는 병합 후 수행한다.",
+    "report": "이번 턴에서 map 작업을 재개했습니다. 코드 구현은 계속하고 배포는 병합 뒤로 미뤘습니다.",
+    "directives": [],
+    "allowed": [
+      "follow",
+      "repair",
+      "human"
+    ],
+    "expected": [
+      "repair",
+      "clarify"
+    ]
+  },
+  {
+    "id": "route-main-status-summary",
+    "expected_fallback": "refer",
+    "parallel_work": [{"id": "map", "role": "implementer", "status": "waiting:implement", "task": "지도 코드를 구현하고 병합 후 배포한다."}],
+    "kind": "route",
+    "role": "architect",
+    "phase": "conversation",
+    "instruction": "map 작업을 재개하되 운영 배포는 병합 후 수행한다.",
+    "report": "현재 map 진행 상황을 확인했고 병합 후 배포 예정입니다. 이 턴은 상태 요약입니다.",
+    "directives": [],
+    "allowed": [
+      "follow",
+      "repair",
+      "human"
+    ],
+    "expected": [
+      "follow",
+      "refer"
+    ]
+  },
+  {
+    "id": "research-user-owned-question",
+    "kind": "research",
+    "instruction": "지도 서비스 도입 방식을 검토하되 유료 서비스의 월 지출 한도는 사용자에게 확인한다.",
+    "context": {
+      "phase": "running",
+      "stage": "clarify",
+      "active_role": "explorer",
+      "goal": "모바일 앱에 적합한 지도 제공 방식을 정한다. 유료 서비스 지출 여부와 한도는 사용자가 아직 결정하지 않았다.",
+      "success_criteria": ["사용자가 허용한 월 비용 안에서 지도 요구사항을 충족한다."],
+      "constraints": ["새 결제나 유료 서비스 도입을 자동 승인하지 않는다."],
+      "latest": {
+        "role": "explorer", "purpose": "clarify",
+        "summary": "기술 조사로 월 지출 의향을 알 수 없다. 비용 상한을 알아야 무료·유료 후보를 비교할 수 있다.",
+        "report": {"questions": [{"question": "지도 서비스 예산을 무료로 제한할까요, 월 3만 원까지 허용할까요?", "why": "유료 서비스를 사용할 의향과 비용 상한은 사용자 선호이며 아직 정해지지 않았습니다.", "owner": "user"}]}
+      },
+      "questions": [{"question": "지도 서비스 예산을 무료로 제한할까요, 월 3만 원까지 허용할까요?", "why": "유료 서비스를 사용할 의향과 비용 상한은 사용자 선호이며 아직 정해지지 않았습니다.", "owner": "user"}],
+      "candidate": null, "open_issues": [], "evidence": [], "history": [],
+      "execution": {"state": "completed", "role": "explorer", "purpose": "clarify", "adapter_busy": false},
+      "stagnation": 0, "recovery_attempts": 0, "allowed_completion": false
+    },
+    "allowed": ["human", "repair", "verify"],
+    "expected": ["human"]
+  },
+  {
+    "id": "research-empirical-question",
+    "kind": "research",
+    "instruction": "제공된 로컬 데이터로 캐시 정책 두 가지를 비교한다. 한정된 로컬 시뮬레이션은 이미 요청 범위에 포함된다.",
+    "context": {
+      "phase": "running",
+      "stage": "critique",
+      "active_role": "critic",
+      "goal": "제공된 읽기·쓰기 이벤트 데이터에서 오래된 값 반환을 최소화하는 캐시 정책을 찾는다.",
+      "success_criteria": ["동일한 이벤트 데이터에서 두 후보의 오래된 값 반환 횟수를 비교한다."],
+      "constraints": ["이미 제공된 로컬 데이터와 한정된 시뮬레이션만 사용한다. 새 권한이나 사용자 선호는 필요하지 않다."],
+      "candidate": {"id": "c1", "summary": "고정 TTL 캐시", "role": "explorer", "turn": 2},
+      "alternatives": [{"id": "c2", "summary": "쓰기 이벤트에 따른 캐시 무효화", "role": "critic", "turn": 3}],
+      "latest": {
+        "role": "critic", "purpose": "critique",
+        "summary": "두 정책의 오래된 값 반환 횟수는 아직 측정하지 않았다. 제공된 데이터로 바로 비교할 수 있다.",
+        "report": {"questions": [{"question": "제공된 데이터에서는 TTL과 쓰기 시 무효화 중 어느 정책이 오래된 값을 더 적게 반환하나요?", "why": "후보 우열을 판단할 관측값이 아직 없지만 로컬 시뮬레이션으로 측정할 수 있습니다.", "owner": "user"}]}
+      },
+      "questions": [{"question": "제공된 데이터에서는 TTL과 쓰기 시 무효화 중 어느 정책이 오래된 값을 더 적게 반환하나요?", "why": "후보 우열을 판단할 관측값이 아직 없지만 로컬 시뮬레이션으로 측정할 수 있습니다.", "owner": "user"}],
+      "open_issues": [{"id": "i1", "claim": "두 후보의 오류 횟수가 알려지지 않았다.", "impact": "측정 전에는 요구사항에 맞는 후보를 비교할 수 없다.", "check": "동일 이벤트 시퀀스에서 오래된 값 반환 횟수를 각각 계산한다."}],
+      "evidence": [], "history": [{"action": "explore", "role": "explorer", "turn": 2}],
+      "execution": {"state": "completed", "role": "critic", "purpose": "critique", "adapter_busy": false},
+      "stagnation": 1, "recovery_attempts": 0, "allowed_completion": false
+    },
+    "allowed": ["human", "repair", "verify"],
+    "expected": ["verify"]
+  },
+  {
+    "id": "research-concrete-counterexample",
+    "kind": "research",
+    "instruction": "정렬된 배열에서 처음 나타나는 목표값의 위치를 찾는 알고리즘을 검토한다.",
+    "context": {
+      "phase": "running",
+      "stage": "critique",
+      "active_role": "critic",
+      "goal": "중복 원소가 있어도 목표값이 처음 나타나는 인덱스를 반환하는 이진 탐색 방법을 만든다.",
+      "success_criteria": ["중복 값 중 가장 작은 인덱스를 반환한다.", "탐색 단계가 로그 규모다."],
+      "constraints": ["새로운 사용자 선택 없이 알고리즘을 수정하고 검증할 수 있다."],
+      "candidate": {"id": "c1", "summary": "가운데 값이 목표와 같으면 가운데 인덱스를 즉시 반환한다.", "role": "explorer", "turn": 2},
+      "latest": {
+        "role": "critic", "purpose": "critique",
+        "summary": "배열 [1,2,2,2,3], 목표 2에서 처음 가운데 인덱스 2를 반환한다. 요구하는 첫 인덱스는 1이므로 즉시 반환 규칙은 반례로 깨진다.",
+        "report": {"candidate_id": "c1", "assessment": "needs_work", "summary": "동일 값을 찾은 뒤 왼쪽 구간을 계속 좁혀야 한다."}
+      },
+      "open_issues": [{"id": "i1", "claim": "일치 즉시 반환하면 가장 왼쪽 중복 원소를 보장하지 못한다.", "impact": "첫 번째 성공 기준이 실패한다.", "check": "일치 후 왼쪽을 계속 탐색하도록 바꾸고 중복·경계 사례를 추적한다."}],
+      "evidence": [{"id": "e1", "candidate_id": "c1", "claim": "현재 후보는 중복 원소의 첫 인덱스를 보장하지 못한다.", "result": "첫 단계 mid=2, a[2]=2이므로 2를 반환하지만 a[1]=2다.", "source": "[1,2,2,2,3]에 대한 명시적 한 단계 추적", "outcome": "refutes"}],
+      "questions": [], "history": [{"action": "explore", "role": "explorer", "turn": 2}],
+      "execution": {"state": "completed", "role": "critic", "purpose": "critique", "adapter_busy": false},
+      "stagnation": 0, "recovery_attempts": 0, "allowed_completion": false
+    },
+    "allowed": ["explore", "critique", "verify", "revise", "reframe", "stop"],
+    "expected": ["revise", "verify"]
+  },
+  {
+    "id": "research-repeated-claims",
+    "kind": "research",
+    "instruction": "오프라인 기기의 중복 작업 요청을 처리하는 방법을 검토한다. 같은 주장을 반복하지 말고 검증 가능한 새 접근을 찾는다.",
+    "context": {
+      "phase": "running",
+      "stage": "critique",
+      "active_role": "critic",
+      "goal": "기기가 오프라인 후 재접속해도 동일 작업 요청이 두 번 처리되지 않게 한다.",
+      "success_criteria": ["재시도와 재접속 사례에서 중복 처리를 방지한다."],
+      "constraints": ["현재 요구사항과 로컬 이벤트 시뮬레이션 범위 안에서 조사한다."],
+      "candidate": {"id": "c1", "summary": "최근 요청 ID를 메모리에 보관한다.", "role": "explorer", "turn": 2},
+      "latest": {
+        "role": "critic", "purpose": "critique",
+        "summary": "이번에도 '메모리만으로 충분한지 확신할 수 없다'를 반복했다. 구체적인 재시작 시퀀스나 새 근거, 수정은 제시하지 않았다.",
+        "report": {"candidate_id": "c1", "assessment": "inconclusive", "summary": "같은 찬반 주장만 반복 중이다."}
+      },
+      "open_issues": [{"id": "i1", "claim": "기기 재시작과 재접속에서 ID 기억이 어떻게 유지되는지 불명확하다.", "impact": "중복 방지 기준을 아직 판별할 수 없다.", "check": "재시작을 포함한 구체적 이벤트 시퀀스로 검증하거나 지속 저장을 쓰는 다른 접근을 비교한다."}],
+      "evidence": [], "questions": [],
+      "history": [
+        {"action": "revise", "role": "explorer", "turn": 4, "summary": "메모리 ID 보관으로 충분하다고 다시 주장. 후보 변경이나 검증 없음."},
+        {"action": "critique", "role": "critic", "turn": 5, "summary": "충분하지 않을 수 있다고 재차 주장. 구체적 반례 없음."},
+        {"action": "revise", "role": "explorer", "turn": 6, "summary": "기존 주장 반복. 새 근거 없음."},
+        {"action": "critique", "role": "critic", "turn": 7, "summary": "동일한 의문 반복. 새 조사나 판별 없음."}
+      ],
+      "execution": {"state": "completed", "role": "critic", "purpose": "critique", "adapter_busy": false},
+      "stagnation": 4, "recovery_attempts": 0, "allowed_completion": false
+    },
+    "allowed": ["explore", "critique", "verify", "revise", "reframe", "stop"],
+    "expected": ["reframe", "verify"]
+  },
+  {
+    "id": "research-ready-synthesis",
+    "kind": "research",
+    "instruction": "유한한 정렬 배열에서 lower_bound를 구하는 방법의 정확성과 종료를 검토한 뒤 사용자에게 정리한다.",
+    "context": {
+      "phase": "running",
+      "stage": "verify",
+      "active_role": "critic",
+      "goal": "정렬 배열에서 목표값 이상인 첫 인덱스를 구하는 lower_bound 알고리즘과 근거를 제시한다.",
+      "success_criteria": ["목표값 이상인 첫 인덱스를 반환한다.", "모든 유한 배열에서 종료한다."],
+      "constraints": ["배열은 오름차순 정렬이며 비어 있을 수 있다."],
+      "candidate": {"id": "c2", "summary": "반열린 구간 [lo,hi)에서 a[mid]<target이면 lo=mid+1, 아니면 hi=mid로 갱신하고 lo를 반환한다.", "role": "explorer", "turn": 4},
+      "best_candidate": {"id": "c2", "summary": "lower_bound의 반열린 구간 이진 탐색", "role": "explorer", "turn": 4},
+      "latest": {
+        "role": "critic", "purpose": "verify",
+        "summary": "탐색자 검토에 이어 같은 후보 c2의 불변식과 종료를 독립적으로 확인했다. 두 성공 기준 모두 현재 근거로 충족된다. 열린 반례나 사용자 질문이 없다.",
+        "report": {
+          "candidate_id": "c2", "assessment": "supported",
+          "acceptance": [
+            {"criterion": "목표값 이상인 첫 인덱스를 반환한다.", "status": "pass", "evidence_ids": ["e1"]},
+            {"criterion": "모든 유한 배열에서 종료한다.", "status": "pass", "evidence_ids": ["e2"]}
+          ]
+        }
+      },
+      "open_issues": [], "questions": [],
+      "evidence": [
+        {"id": "e1", "candidate_id": "c2", "claim": "첫 조건 충족 인덱스를 반환한다.", "result": "lo 앞은 모두 target 미만이고 hi 이후는 모두 target 이상이라는 불변식을 유지한다. lo=hi이면 그 경계가 답이다. 빈 배열은 0을 반환한다.", "source": "합성 검증 기록: 초기화·각 분기 보존·종료 시 결론을 명시한 불변식 증명", "outcome": "supports"},
+        {"id": "e2", "candidate_id": "c2", "claim": "모든 유한 배열에서 종료한다.", "result": "lo<hi 동안 mid는 lo<=mid<hi이므로 두 분기 모두 비음수 정수 hi-lo가 엄격히 감소한다.", "source": "합성 검증 기록: 구간 길이 감소 증명", "outcome": "supports"}
+      ],
+      "history": [
+        {"action": "revise", "role": "explorer", "turn": 4, "summary": "c2를 제시했다."},
+        {"action": "verify", "role": "explorer", "turn": 5, "summary": "c2의 두 기준을 e1·e2와 연결해 pass, assessment supported로 검토했다."},
+        {"action": "verify", "role": "critic", "turn": 6, "summary": "같은 c2의 두 기준을 e1·e2와 연결해 pass, assessment supported로 독립 검토했다."}
+      ],
+      "execution": {"state": "completed", "role": "critic", "purpose": "verify", "adapter_busy": false},
+      "stagnation": 0, "recovery_attempts": 0, "allowed_completion": true
+    },
+    "allowed": ["explore", "critique", "verify", "revise", "reframe", "stop", "synthesize"],
+    "expected": ["synthesize"]
   }
 ]

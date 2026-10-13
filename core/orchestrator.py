@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import Any
 
 from ..adapters import AgentAdapter, TurnResult, make_adapter
-from .config import SUPPORTED_CLIS, Config, Role, validate_role_name
+from .config import (RESEARCH_ROLE_LABELS, SUPPORTED_CLIS, WORKFLOWS, Config, Role,
+                     ensure_research_roles, validate_role_name)
 from .dialogue import Dialogue, Turn, extract_directives
 from .agreement import (changed_files, fingerprint, new_task, parse_plan, read_plan, record_plan,
                         task_status, text_hash)
@@ -97,6 +98,7 @@ class AutopilotUI:
 class Orchestrator:
     def __init__(self, cfg: Config, bus: EventBus, ui: HumanUI, fake: bool = False):
         self.cfg = cfg
+        ensure_research_roles(cfg)
         self.bus = bus
         self.ui = AutopilotUI(ui, self)
         self.fake = fake
@@ -104,7 +106,7 @@ class Orchestrator:
         self.dialogue = Dialogue(cfg.project)
         self.git = Git(cfg.project, bool(cfg.settings.get("git_snapshots", True)))
         self.git.warning = lambda message: self.notice(message, 'warn')
-        self.policy = Policy(cfg.project, cfg.policy, cfg.main)
+        self.policy = Policy(cfg.project, cfg.policy, self.active_main)
         self.adapters: dict[str, AgentAdapter] = {}
         self.reviewer: AgentAdapter | None = None
         self.reviewer_lock = asyncio.Lock()
@@ -147,6 +149,8 @@ class Orchestrator:
         self._compact_due: set[str] = set()  # 작업 경계에서 미리 압축할 역할
         self._compact_forced: set[str] = set()  # 사람이 /compact 로 요청한 역할
         self._pending_report = False  # 병렬 작업 보고를 메인에게 전달해야 함
+        self._deferred_controls: list[dict] = []
+        self._control_retries: dict[tuple, int] = {}
         self.budget_usd: float | None = cfg.runtime.get("budget_usd")
         self.max_hours: float | None = cfg.runtime.get("max_hours")
         if cfg.state.task:
@@ -157,6 +161,8 @@ class Orchestrator:
         self.design = DesignQuestions(self)
         self.work = WorkBoard(self)
         self.jev = JevControl(self)
+        from .research import ResearchController
+        self.research = ResearchController(self)
         from .turn_routing import TurnRouter
         self.turn_router = TurnRouter(self)
         bus.subscribe(self._on_event)
@@ -165,6 +171,36 @@ class Orchestrator:
         self._startup_warnings = [*cfg.load_warnings, *self.work.load_warnings]
         cfg.load_warnings.clear()
         self.work.load_warnings.clear()
+
+    @property
+    def active_main(self) -> str:
+        return "explorer" if self.cfg.state.workflow == "research" else self.cfg.main
+
+    def workflow_change_reason(self) -> str:
+        if (self.running or self._turn_active or self.running_role or self.loading
+                or self.pending_approvals or self.reviewer_lock.locked()
+                or self._input_pending or not self.inbox.empty()
+                or any(ad.busy for ad in self.adapters.values())
+                or (self.reviewer and self.reviewer.busy)):
+            return "진행이 끝나거나 중지한 뒤 다음 요청 전에 모드를 선택하세요."
+        if self.cfg.state.task or self.work.active():
+            return "진행 중인 개발 작업을 완료하거나 취소한 뒤 모드를 선택하세요."
+        return ""
+
+    def set_workflow(self, name: str) -> str:
+        if name not in WORKFLOWS:
+            raise ValueError("작업 모드는 development(개발) 또는 research(연구)입니다.")
+        if name == self.cfg.state.workflow:
+            return f"현재 {WORKFLOWS[name]}입니다."
+        reason = self.workflow_change_reason()
+        if reason:
+            raise ValueError(reason)
+        self.cfg.state.workflow = name
+        self.policy.main_role = self.active_main
+        self._stale_reviewer = self.reviewer is not None
+        self.cfg.save_state()
+        self.emit_status()
+        return f"{WORKFLOWS[name]} 선택됨. 다음 메시지부터 적용합니다."
 
     @property
     def full_auto(self) -> bool:
@@ -203,7 +239,12 @@ class Orchestrator:
     async def run_agent_turn(self, ad, prompt, *, conventions=None):
         from .verification import verification_guide
         from .conventions import load_conventions, conventions_guide
-        prompt += "\n" + verification_guide(self.cfg.settings)
+        if getattr(ad, "turn_kind", None) == "research":
+            prompt += ("\n[연구 검증]\n사용자 목표와 성공 기준을 기준으로 가장 중요한 가정·반례를 확인하세요. "
+                       "문제에 맞는 논증·계산·실험·출처 검토를 사용하고, 실제 확인한 결과와 미확인 주장을 구분하세요. "
+                       "도구 실행이나 출처를 확인하지 않고 검증했다고 보고하지 마세요.")
+        else:
+            prompt += "\n" + verification_guide(self.cfg.settings)
         snapshot = load_conventions(self.cfg) if conventions is None else conventions
         if snapshot.get("enabled") and snapshot.get("error"):
             return TurnResult("", ok=False, error="코딩 컨벤션: " + snapshot["error"])
@@ -306,6 +347,10 @@ class Orchestrator:
             "run_turns": self.run_turns,
             "max_turns": None if mt is None else mt + self.extra_turns,
             "mode": self.cfg.state.mode,
+            "workflow": self.cfg.state.workflow,
+            "workflow_can_change": not self.workflow_change_reason(),
+            "workflow_change_reason": self.workflow_change_reason(),
+            "research": self.research.snapshot(),
             "full_auto": self.full_auto,
             "jev": self.jev.status(),
             "usage_limit_retry": self.usage.enabled,
@@ -321,7 +366,7 @@ class Orchestrator:
             "tokens": self.tokens,
             "elapsed": time.time() - self.started,
             "roles": list(self.cfg.roles.keys()),
-            "main": self.cfg.main,
+            "main": self.active_main,
             "task": ({k: self.cfg.state.task[k] for k in ("id", "phase", "plan_path", "submitted_version",
                        "agreed_version", "rounds", "waiting")} if self.cfg.state.task else None),
             "task_summary": task_status(self.cfg.state.task),
@@ -414,7 +459,7 @@ class Orchestrator:
             self.reviewer = None
             self._stale_reviewer = False
         if self.reviewer is None:
-            role = self.cfg.main_role()
+            role = self.cfg.roles[self.active_main]
             ad = make_adapter(role, self.project, self.bus, None, self.cfg.state.reviewer_sessions.get(role.name),
                               "", reviewer=True, fake=self.fake,
                               fork_session=role.name in self.cfg.state.reviewer_fork_on_resume)
@@ -499,6 +544,9 @@ class Orchestrator:
             self._approval_activity[req.role] = (count - 1, state)
 
     async def _handle_approval(self, req: ApprovalRequest, policy: Policy | None = None) -> Decision:
+        if self.research.enabled and (self.research.state.get("stage") == "clarify"
+                or (self.research.state.get("stage") == "repair" and self.research.state.get("repair_stage") == "clarify")):
+            return read_only_decision(req, "연구 목표와 필수 질문 확인")
         if self.design.enabled and self.design.state.get("phase") in ("initial", "awaiting_initial"):
             return read_only_decision(req, "초기 설계 질문")
         role = self.role_for(req.role)
@@ -543,7 +591,7 @@ class Orchestrator:
             if d is None:
                 d = await self._ask_human(req, reason + " — 설계자가 사람에게 넘김", opinion)
         else:
-            if self.cfg.policy.get("ask_architect_opinion_for_human", True) and req.role != self.cfg.main:
+            if self.cfg.policy.get("ask_architect_opinion_for_human", True) and req.role != self.active_main:
                 _, opinion = await self._ask_architect(req, reason, opinion_only=True)
             d = await self._ask_human(req, reason, opinion)
         if policy.verification_command(req):
@@ -565,6 +613,9 @@ class Orchestrator:
         task = self.current_task.get(req.role, "")
         if self.cfg.state.task:
             task = f"{self.cfg.state.task['instruction']}\n현재 합의 단계: {self.cfg.state.task['phase']}"
+        elif self.research.enabled:
+            task = ("연구 목표: " + self.research.state.get("goal", "") + "\n사용자 제약: "
+                    + ", ".join(self.research.state.get("constraints", [])))
         prompt = (opinion_prompt if opinion_only else review_prompt)(req.summary, req.role, reason, task)
         limit = int(self.cfg.settings.get("context_limit_tokens") or 0)
         try:
@@ -572,14 +623,14 @@ class Orchestrator:
                 if self.reviewer and limit and self.reviewer.context_tokens > limit:
                     await self._fresh_reviewer(f"컨텍스트 {self.reviewer.context_tokens:,} 토큰 > 한도 {limit:,}")
                 rev = await self.get_reviewer()
-                self.notice(f"설계자 심사 중: {req.summary[:100]}", role=self.cfg.main)
+                self.notice(f"권한 심사 중: {req.summary[:100]}", role=self.active_main)
                 try:
                     tr = await self._review_turn(rev, prompt, timeout)
                     if not tr.ok and tr.context_overflow:
                         await self._fresh_reviewer("입력 한도 초과 오류")
                         rev = await self.get_reviewer()
                         tr = await self._review_turn(rev, prompt, timeout)
-                    self._remember_session(self.cfg.main, rev, reviewer=True)
+                    self._remember_session(self.active_main, rev, reviewer=True)
                 except asyncio.TimeoutError:
                     return None, "(설계자 심사 시간 초과)"
         except Exception as e:
@@ -600,7 +651,7 @@ class Orchestrator:
         return None, opinion
 
     async def _review_turn(self, rev, prompt: str, timeout: float):
-        label = getattr(rev, 'label', self.cfg.main + ' (심사)')
+        label = getattr(rev, 'label', self.active_main + ' (심사)')
         self.set_activity(label, 'reviewing', start=True)
         try:
             result = await self.usage.run(rev, prompt, lambda text: self._review_turn_wait(rev, text, timeout))
@@ -628,7 +679,7 @@ class Orchestrator:
                 finally:
                     if self.reviewer is rev:
                         self.reviewer = None
-                    self.cfg.state.reviewer_sessions.pop(self.cfg.main, None)
+                    self.cfg.state.reviewer_sessions.pop(self.active_main, None)
                     self.cfg.save_state()
             raise
 
@@ -660,7 +711,12 @@ class Orchestrator:
         text = text.strip()
         if not text:
             return ""
-        target = to or self.cfg.main
+        target = to or self.active_main
+        if self.research.enabled:
+            # Goal/criteria revisions must pass through begin(), even when a CLI
+            # supports injecting text into its current turn.
+            self.submit(text, to=to)
+            return f"→ {target}: 현재 연구 턴이 끝나면 목표와 질문에 반영합니다."
         async with self._steer_lock:
             ad = self.adapters.get(target)
             reason = "대상의 진행 중인 턴이 없습니다"
@@ -679,6 +735,7 @@ class Orchestrator:
             return f"→ {target}: {reason}. 메시지를 다음 턴에 전달합니다."
 
     def _append_human(self, to: str | None, text: str) -> int:
+        self._control_retries.clear()
         self._extend_negotiations()
         n = self._next_number()
         body = (f"@{to} " if to else "") + text
@@ -688,6 +745,54 @@ class Orchestrator:
         self.bus.emit("human", "human", text=text, n=n, to=to)
         return n
 
+    def has_pending_user_input(self) -> bool:
+        """Internal work notifications do not supersede a completed agent turn."""
+        return any(text != REPORT_TRIGGER for _, text in tuple(self.inbox._queue))
+
+    def record_control_outcome(self, action, stage, *, role=None, turn=None,
+                               receipts=None, reason="", applied=False, before=None, after=None):
+        data = dict(action=action, stage=stage, turn=turn, applied=bool(applied),
+                    receipts=receipts or [], reason=reason, before=before, after=after)
+        from .jev_settings import get_api_key
+        data = self.jev._redact(data, get_api_key(self.cfg))
+        self.bus.emit("control_outcome", role, **data)
+        entry = self.jev._log_entry.get()
+        if entry or self.jev.enabled("flow"):
+            from .jev_log import append_outcome, write_control_outcome
+            try:
+                record = {"종류": "control_execution", **data}
+                if entry:
+                    append_outcome(entry, record)
+                else:
+                    write_control_outcome(self.cfg.project, record)
+            except OSError:
+                self.jev._warn_log()
+
+    def defer_control_turn(self, role, kind, turn, reason):
+        """Keep a superseded turn for review, never replay its old commands."""
+        item = dict(role=role, kind=kind, turn=turn.n, reason=reason)
+        if item not in self._deferred_controls:
+            self._deferred_controls.append(item)
+            self.dialogue.append_note(f"[제어 처리 보류] {role} #{turn.n}: {reason}. "
+                                      "다음 설계자 턴에서 최신 입력과 대조해 재검토합니다.")
+        self.record_control_outcome("defer", "superseded", role=role, turn=turn.n, reason=reason)
+        if not self.has_pending_user_input() and not self.stop_requested and self.not_paused.is_set():
+            self._pending_report = True
+
+    def _attach_deferred_controls(self, nxt):
+        if not nxt or not self._deferred_controls:
+            return nxt
+        items, self._deferred_controls = self._deferred_controls, []
+        role, kind, info = nxt
+        if kind == "human":
+            info = f"최신 사용자 입력은 DIALOGUE.md #{info}입니다."
+            kind = "system"
+        note = "\n\n[미처리 제어 재검토]\n" + "\n".join(
+            f"- {i['role']} #{i['turn']}: {i['reason']}" for i in items)
+        note += ("\n위 턴의 명령은 실행된 것으로 간주하지 마세요. 최신 사용자 입력과 실제 작업 보드를 "
+                 "대조해 여전히 필요한 명령만 새로 제출하세요. 취소·중단된 작업이나 사람 답변 대기는 유지하세요.")
+        return (self.cfg.main, kind, info + note)
+
     def _drain_inbox(self, nxt: Next | None) -> Next | None:
         while not self.inbox.empty():
             to, text = self.inbox.get_nowait()
@@ -695,18 +800,20 @@ class Orchestrator:
                 self._pending_report = True
                 continue
             n = self._append_human(to, text)
-            target = to if to in self.cfg.roles else self.cfg.main
+            target = to if to in self.cfg.roles else self.active_main
             if self.cfg.state.task:
                 if not self.cfg.state.task["waiting"]:
                     self._wait_task("사람 메시지에 대한 메인의 판단 대기")
                 target = self.cfg.main
-            nxt = self.design.begin((target, "human", str(n)))
+            first = (target, "human", str(n))
+            nxt = self.research.begin(first) if self.research.enabled else self.design.begin(first)
         return nxt
 
     async def serve(self) -> None:
         """사람 메시지를 기다렸다가 요청 단위로 진행한다 (TUI 워커로 실행)."""
         self._startup_notices()
-        self.work.start()
+        if not self.research.enabled:
+            self.work.start()
         self.emit_status()
         while True:
             if self._pending_report:
@@ -718,10 +825,12 @@ class Orchestrator:
             self._input_pending = False
             if text == REPORT_TRIGGER:
                 self._pending_report = False
+                if self.research.enabled:
+                    continue
                 first: Next = (self.cfg.main, "system", self.work.report_prompt())
             else:
                 n = self._append_human(to, text)
-                target = to if to in self.cfg.roles else self.cfg.main
+                target = to if to in self.cfg.roles else self.active_main
                 if self.cfg.state.task:
                     if not self.cfg.state.task["waiting"]:
                         self._wait_task("사람 메시지에 대한 메인의 판단 대기")
@@ -740,14 +849,18 @@ class Orchestrator:
     # ================= 진행 루프 =================
     async def run(self, nxt: Next | None) -> None:
         self._startup_notices()
-        self.work.start()
+        if not self.research.enabled:
+            self.work.start()
         try:
-            nxt = self.design.begin(nxt)
+            nxt = self.research.begin(nxt) if self.research.enabled else self.design.begin(nxt)
             await self._run_loop(nxt)
-            self.design.finish()
+            if not self.research.enabled:
+                self.design.finish()
             if not self.cfg.state.task:  # 요청 하나가 끝났으면 다음 요청 전에 정리
                 self.mark_compaction_due(reason="요청 종료")
         finally:
+            if self.research.enabled and self.research.state.get("phase") == "running":
+                self.research.pause("진행이 종료되거나 중단되었습니다. 새 메시지로 이어갈 수 있습니다.")
             if self.cfg.state.task and not self.cfg.state.task["waiting"]:
                 self._wait_task("진행 종료/중단 후 메인의 판단 대기")
 
@@ -787,8 +900,9 @@ class Orchestrator:
                     self.set_max_turns(None)
                 elif c == "wrap":
                     final = True
-                    nxt = (self.cfg.main, "system",
-                           "턴 한도에 도달해 사람이 정리를 요청했습니다. 지금까지의 진행 상황과 남은 일을 정리하고 STATUS done 으로 마치세요.")
+                    nxt = ((self.active_main, "research", "턴 한도입니다. 현재 해결안과 검증 결과, 미해결 문제를 정리하세요. 목표를 달성했다고 선언하지 마세요.")
+                           if self.research.enabled else (self.cfg.main, "system",
+                           "턴 한도에 도달해 사람이 정리를 요청했습니다. 지금까지의 진행 상황과 남은 일을 정리하고 STATUS done 으로 마치세요."))
                 else:
                     break
 
@@ -802,7 +916,7 @@ class Orchestrator:
             too_big = bool(max_kb and self.dialogue.path.exists()
                            and self.dialogue.path.stat().st_size > max_kb * 1024
                            and self.cfg.state.turns_since_checkpoint >= 4)
-            if nxt[0] == self.cfg.main and ((every and self.cfg.state.turns_since_checkpoint >= every) or too_big):
+            if not self.research.enabled and nxt[0] == self.cfg.main and ((every and self.cfg.state.turns_since_checkpoint >= every) or too_big):
                 res = await self._turn(self.cfg.main, "checkpoint", "")
                 if res and res[0].ok:
                     dest = self.dialogue.archive_before(res[1].n)
@@ -825,6 +939,9 @@ class Orchestrator:
             if not self.inbox.empty():
                 nxt = self._drain_inbox(nxt)
                 continue
+            if not self.research.enabled:
+                nxt = self._attach_deferred_controls(nxt)
+            role, kind, info = nxt
             res = await self._turn(role, kind, info)
             if res is None:
                 break
@@ -833,6 +950,11 @@ class Orchestrator:
             self.emit_status()
             if final:
                 break
+
+            if self.research.enabled:
+                await self.not_paused.wait()
+                nxt = await self._decide(role, kind, tr, turn)
+                continue
 
             negotiating = self.cfg.state.task and self.cfg.state.task["phase"] in ("plan", "plan_review")
             problem = None if negotiating else self._check_flow(role)
@@ -985,9 +1107,9 @@ class Orchestrator:
         if self.reviewer:
             await self.reviewer.close()
         self.reviewer = None
-        self.cfg.state.reviewer_sessions.pop(self.cfg.main, None)
+        self.cfg.state.reviewer_sessions.pop(self.active_main, None)
         self.cfg.save_state()
-        self.notice(f"설계자 심사 세션을 새로 시작합니다 ({reason}).", role=self.cfg.main)
+        self.notice(f"권한 심사 세션을 새로 시작합니다 ({reason}).", role=self.active_main)
 
     def _next_number(self) -> int:
         return max(self.cfg.state.last_n, self.dialogue.max_number(), self._active_turn_n or 0) + 1
@@ -1037,7 +1159,9 @@ class Orchestrator:
         def prepare(a: AgentAdapter) -> None:
             a.turn_kind = kind
             a.agreement_phase = task["phase"] if task else None
-            a.plan_read_only = kind in ("design_questions", "jev_consult") or bool(task and role_name != self.cfg.main
+            a.plan_read_only = kind in ("design_questions", "jev_consult") or bool(kind == "research" and
+                                    (self.research.state.get("stage") == "clarify" or
+                                     (self.research.state.get("stage") == "repair" and self.research.state.get("repair_stage") == "clarify"))) or bool(task and role_name != self.cfg.main
                                     and (task["phase"] in ("plan", "plan_review") or task["waiting"]))
             a.verification_command = (task["test_command"] if task and task["phase"] == "verify"
                                       and role_name == self.cfg.main else None)
@@ -1058,11 +1182,15 @@ class Orchestrator:
         prompt = self._guard_prompt(prompt, n, role_name)
         if kind == "delegate":
             self.current_task[role_name] = info
+        elif kind == "research":
+            self.current_task[role_name] = (self.research.state.get("goal") or self.research.state.get("request", ""))
         self.running_role = role_name
         self._active_turn_n = n
         self.bus.emit("turn_start", role_name, n=n, kind=kind, info=info)
         self.emit_status()
 
+        if kind == "research":
+            self.research.dispatched(role_name, n)
         tr = await self.run_agent_turn(ad, prompt, conventions=conventions)
         if not tr.ok and tr.context_overflow and not tr.interrupted and not self.stop_requested:
             # 입력 한도 초과: 같은 세션으로는 다시 해도 실패하므로 새 세션으로 한 번 자동 재시도
@@ -1150,6 +1278,51 @@ class Orchestrator:
         return None
 
     async def _decide(self, role: str, kind: str, tr: TurnResult, turn: Turn) -> Next | None:
+        if self.research.enabled:
+            return await self.research.decide(role, kind, tr, turn)
+        # Local source checks can bypass JEV. Never attach their outcome to a
+        # previous turn's classifier entry left in this async context.
+        self.jev._log_entry.set(None)
+        def state():
+            task = self.cfg.state.task
+            return {"task": ({k: task.get(k) for k in ("id", "phase", "waiting", "wait_reason")}
+                             if task else None),
+                    "design_question_phase": self.design.state.get("phase", "idle"),
+                    "pending_question_count": len(self.design.state.get("pending", []))}
+        before = state()
+        nxt = await self._decide_impl(role, kind, tr, turn)
+        action = getattr(turn, "jev_route_action", None)
+        receipts = getattr(turn, "control_receipts", [])
+        if action or receipts:
+            after = state()
+            rejected = any(not r["accepted"] for r in receipts)
+            own_change = before["task"] != after["task"]
+            waiting = action in ("human", "dependency", "protocol_wait")
+            applied = (any(r["accepted"] for r in receipts) if receipts else
+                       bool(nxt or own_change or waiting))
+            stage = ("rejected" if rejected else "executed" if receipts else
+                     "routed" if nxt else "waiting" if own_change or waiting else "no_transition")
+            self.record_control_outcome(action or "work_commands", stage, role=role, turn=turn.n,
+                                        receipts=receipts, applied=applied, before=before, after=after,
+                                        reason=getattr(turn, "jev_source_issue", ""))
+        return nxt
+
+    def _control_feedback(self, role, receipts):
+        failures = [r for r in receipts if not r["accepted"]]
+        if not failures:
+            return None
+        key = tuple((r["action"], r["id"], r["reason"]) for r in failures)
+        count = self._control_retries.get(key, 0)
+        self._control_retries[key] = count + 1
+        reasons = "\n".join(f"- {r['action']} {r['id']}: {r['reason']}" for r in failures)
+        if count >= 2:
+            self.notice("작업 명령 보완 한도에 도달했습니다. 미실행 상태를 유지합니다.\n" + reasons, "warn")
+            return None
+        return (role, "system", "[작업 명령 실행 결과]\n" + reasons
+                + "\n위 명령은 실행되지 않았습니다. 실제 작업 보드를 확인하고 원인을 수정하거나 "
+                  "명령을 철회하세요. 이미 성공한 명령은 반복하지 마세요. 사람 답변 대기는 우회하지 마세요.")
+
+    async def _decide_impl(self, role: str, kind: str, tr: TurnResult, turn: Turn) -> Next | None:
         if not tr.ok or tr.interrupted or self.stop_requested:
             self._wait_task(tr.error or "턴 중단")
             return None
@@ -1188,7 +1361,7 @@ class Orchestrator:
             return await self._decide_task(role, kind, turn, review_text=convention_report)
         flow_commands = {"PLAN", "AGREE", "REVISE", "ACCEPT", "REWORK", "RESUME", "CANCEL"}
         if any(k in flow_commands for k, _ in turn.directives):
-            if not (role == self.cfg.main and (WORK_BLOCK.search(tr.full_text or tr.text or "")
+            if not (role == self.cfg.main and (WORK_BLOCK.search(tr.text or "")
                                                or WORK_BLOCK.search(turn.body or ""))):
                 return (role, "system", "활성 합의 task가 없습니다. 메인의 DELEGATE로 작업을 시작하세요.")
             # 작업 블록이 함께 왔으면 남은 흐름 지시문은 무시하고 블록을 처리한다.
@@ -1214,18 +1387,36 @@ class Orchestrator:
                     self.notice("완료 보류: " + issue, "warn")
                     return (main, "system", "코딩 컨벤션 확인이 끝나지 않았습니다: " + issue
                             + " 실제 변경을 검토해 규칙별 근거를 보완하거나 위반을 재작업시키세요. 통과 전 STATUS done을 내지 마세요.")
-            for msg in self.work.handle_directives(turn.directives):
-                self.notice(msg)
+            receipts = self.work.handle_directives_receipts(turn.directives)
+            turn.__dict__["control_receipts"] = receipts
+            for receipt in receipts:
+                self.notice(receipt["reason"])
             try:
-                specs = parse_work_block(tr.full_text or tr.text) or parse_work_block(turn.body)
+                specs = parse_work_block(turn.body)
+                if specs is None:
+                    specs = parse_work_block(tr.text)
             except Exception as e:
                 return (main, "system", f"duet-work 블록을 해석하지 못했습니다: {e}. YAML 목록 형식으로 다시 내세요.")
             if specs is not None:
+                before_work = dict(self.work.items)
                 errors = self.work.submit(specs, turn.n)
+                for spec in specs:
+                    if not isinstance(spec, dict):
+                        continue
+                    wid = str(spec.get("id", ""))
+                    item = self.work.items.get(wid)
+                    accepted = (item is not None and item is not before_work.get(wid)
+                                and item.from_turn == turn.n)
+                    receipts.append(dict(action="SUBMIT_WORK", id=wid, accepted=accepted,
+                                         before="absent" if wid not in before_work else "existing",
+                                         after=item.status if item else "absent",
+                                         reason="작업 등록" if accepted else " / ".join(errors) or "새 작업이 등록되지 않았습니다"))
                 if errors:
                     return (main, "system", "duet-work 블록을 받을 수 없습니다:\n- " + "\n- ".join(errors)
                             + "\n고쳐서 다시 내거나, 순차 진행이면 DELEGATE 를 쓰세요.")
-                return None  # 작업들은 백그라운드에서 진행되고, 끝나면 보고가 돌아온다
+                return self._control_feedback(main, receipts)
+            if any(not r["accepted"] for r in receipts):
+                return self._control_feedback(main, receipts)
             d = turn.directive("DELEGATE")
             if d is None:
                 return None
@@ -1233,7 +1424,7 @@ class Orchestrator:
                 return (main, "system", "병렬 작업이 진행 중이라 DELEGATE 를 받을 수 없습니다 (메인 작업 트리 충돌 방지). "
                         "추가 작업은 duet-work 블록으로 내거나, 병렬 작업이 끝난 뒤 위임하세요.")
             target = d.split()[0] if d.split() else ""
-            if target not in self.cfg.roles or target == main:
+            if target not in self.cfg.roles or target == main or target in RESEARCH_ROLE_LABELS:
                 others = ", ".join(r for r in self.cfg.roles if r != main) or "(없음)"
                 return (main, "system", f"'{target}' 역할은 위임할 수 없습니다. 가능한 역할: {others}. 다시 위임하거나 STATUS done 으로 마치세요.")
             if self.design.blocked(target):
@@ -1591,6 +1782,8 @@ class Orchestrator:
             await self.close()
             self.dialogue.path.write_bytes(dialogue)
             self.cfg.state = state
+            from .research import ResearchController
+            self.research = ResearchController(self)
             if state.task:
                 state.task["waiting"] = True
                 state.task["wait_reason"] = "저장본 복원 후 메인의 판단 대기"
@@ -1603,7 +1796,7 @@ class Orchestrator:
             self.hashes.clear()
             self.task_history.clear()
             self.notes.clear()
-            self.policy = Policy(self.project, self.cfg.policy, self.cfg.main)
+            self.policy = Policy(self.project, self.cfg.policy, self.active_main)
             self.policy.task = state.task
             self._warn_plan_hash()
             self.run_turns = self.extra_turns = 0
@@ -1636,6 +1829,8 @@ class Orchestrator:
         self.emit_status()
 
     async def remove_role(self, name: str) -> str:
+        if name in RESEARCH_ROLE_LABELS:
+            return "연구 모드의 기본 역할은 지울 수 없습니다. 모델과 역할 설정은 변경할 수 있습니다."
         if name == self.cfg.main:
             return "메인 역할은 지울 수 없습니다."
         if name not in self.cfg.roles:
@@ -1657,6 +1852,8 @@ class Orchestrator:
         r = self.cfg.roles.get(name)
         if not r:
             return f"'{name}' 역할이 없습니다."
+        if name in RESEARCH_ROLE_LABELS and (self.running or self._turn_active):
+            return "연구 역할 설정은 현재 진행을 중지한 뒤 변경하세요."
         if field == "context_limit":
             v = value.replace(",", "").replace("_", "").lower().strip()
             mult = 1000 if v.endswith("k") else 1
@@ -1693,7 +1890,7 @@ class Orchestrator:
         if field in ("cli", "model"):
             self.cfg.state.sessions.pop(name, None)
             self.cfg.save_state()
-        if name == self.cfg.main and self.reviewer:
+        if name == self.active_main and self.reviewer:
             await self.reviewer.close()
             self.reviewer = None
         return f"{name}.{field} = {value} (다음 턴부터 적용)"

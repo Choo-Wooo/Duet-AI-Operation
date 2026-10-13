@@ -73,7 +73,7 @@ def write_save(cfg: Config, name: str, *, note: str = "", force: bool = False,
         raise ValueError(f"저장본 '{name}'이 이미 있습니다. /save {name} --force 로 덮어쓰세요.")
     meta = {
         "name": name, "created_at": datetime.now(timezone.utc).isoformat(), "note": note,
-        "last_n": cfg.state.last_n, "mode": cfg.state.mode, "git_head": git_head(cfg.project),
+        "last_n": cfg.state.last_n, "mode": cfg.state.mode, "workflow": cfg.state.workflow, "git_head": git_head(cfg.project),
         "roles": {n: {"cli": r.cli, "model": r.model} for n, r in cfg.roles.items()},
         "duet_version": __version__, "autosave": autosave,
         "archives": sorted(p.relative_to(cfg.project).as_posix()
@@ -120,6 +120,8 @@ def read_save(cfg: Config, name: str) -> tuple[dict, State, bytes, dict]:
             raise ValueError("meta/state/roles는 객체여야 합니다")
         state = State(**{k: v for k, v in raw.items() if k in State.__dataclass_fields__})
         validate_task(state.task)
+        if state.workflow not in ("development", "research") or not isinstance(state.research, dict):
+            raise ValueError("잘못된 workflow/research")
         for field in ("sessions", "reviewer_sessions", "seen"):
             value = getattr(state, field)
             value_type = int if field == "seen" else str

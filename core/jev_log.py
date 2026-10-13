@@ -180,10 +180,20 @@ def write_decision(project: Path, record: dict) -> DecisionLogEntry:
     return entry
 
 
+def write_control_outcome(project: Path, record: dict) -> DecisionLogEntry:
+    """Record a local protocol result even when no model judgment was needed."""
+    entry = DecisionLogEntry(_folder(project) / LOG_NAME, uuid4().hex)
+    append_outcome(entry, record)
+    return entry
+
+
 def append_outcome(entry: DecisionLogEntry, record: dict) -> None:
     now = datetime.now().astimezone().isoformat(timespec='seconds')
+    note = ('아래는 명령 처리 후 확인한 상태와 실행 결과입니다. 작업 등록·재개는 작업 완료를 뜻하지 않습니다.'
+            if record.get('종류') == 'control_execution' else
+            '아래 기록은 관제의 적용 판단이며 도구 실행·작업 완료를 보장하지 않습니다.')
     text = (f'## 관제 후속 판단 · {now}\n\n- 판단 ID: {entry.decision_id}\n\n'
-            '아래 기록은 관제의 적용 판단이며 도구 실행·작업 완료를 보장하지 않습니다.\n\n' + block(record))
+            + note + '\n\n' + block(record))
     _check_path(entry.path)
     with _locked(entry.path.parent):
         _append(entry.path, text)

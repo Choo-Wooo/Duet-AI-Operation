@@ -234,7 +234,15 @@ def setup_env(tmp_path):
     (home / ".local" / "bin").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / "duet").symlink_to(DUET_DIR)
+    setup_dir = proj / "duet"
+    setup_dir.mkdir()
+    # setup.sh also probes absolute macOS install locations, outside PATH/HOME.
+    # Point only the fixture copy at empty test locations so installed host CLIs
+    # and Homebrew's shellenv cannot leak into the "no CLI" scenario.
+    script = (DUET_DIR / "setup.sh").read_text()
+    for location in ("/opt/homebrew", "/usr/local"):
+        script = script.replace(location, str(tmp_path / "system" / location.lstrip("/")))
+    (setup_dir / "setup.sh").write_text(script)
     venv = proj / ".duet" / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "python").symlink_to(sys.executable)

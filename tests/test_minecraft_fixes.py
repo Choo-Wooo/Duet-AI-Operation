@@ -24,9 +24,34 @@ from test_agreement import advance, agreed, orch  # noqa: F401  (픽스처 재�
 WORK = "```duet-work\n- id: next-a\n  role: implementer\n  task: 다음 단계: 문 열기\n```"
 
 
-def test_accept_then_work_block_same_turn(orch):  # noqa: F811
-    seen = []
-    orch.work.submit = lambda specs, n: seen.append(specs) or []
+def _enable_work_registration(orch, monkeypatch):
+    """Use the real board and temporary Git repo; do not launch worker models."""
+    project = orch.project
+    _git(project, "init", "-q", "-b", "main")
+    _git(project, "config", "user.email", "me@example.com")
+    _git(project, "config", "user.name", "Me")
+    (project / ".gitignore").write_text(".duet/\n")
+    _git(project, "add", ".gitignore", "DIALOGUE.md")
+    _git(project, "commit", "-q", "-m", "test registration base")
+    orch.cfg.settings["git_snapshots"] = True
+    orch.git.enabled = True
+    orch.work.wt = Worktrees(project)
+    monkeypatch.setattr(orch.work, "schedule", lambda: None)
+
+
+def _assert_registered(orch):
+    item = orch.work.items["next-a"]
+    assert item.task == "다음 단계: 문 열기" and item.role == "implementer"
+    assert item.status == "queued" and item.from_turn > 0
+    saved = json.loads(orch.work.path.read_text())
+    assert any(row["id"] == item.id and row["task"] == item.task for row in saved["items"])
+    receipts = [r for e in orch.events if e.kind == "control_outcome"
+                for r in e.data.get("receipts", []) if r["action"] == "SUBMIT_WORK"]
+    assert len(receipts) == 1 and receipts[0]["accepted"]
+
+
+def test_accept_then_work_block_same_turn(orch, monkeypatch):  # noqa: F811
+    _enable_work_registration(orch, monkeypatch)
 
     async def scenario():
         await agreed(orch)
@@ -34,18 +59,53 @@ def test_accept_then_work_block_same_turn(orch):  # noqa: F811
         nxt = await advance(orch, "architect", "검증 통과.\n" + WORK + "\n<!-- duet: ACCEPT -->", "verify")
         assert nxt is None
         assert orch.cfg.state.task is None  # 순차 작업은 완료
-        assert seen and seen[0][0]["id"] == "next-a" and seen[0][0]["task"] == "다음 단계: 문 열기"
+        _assert_registered(orch)
 
     asyncio.run(scenario())
 
 
-def test_flow_directive_without_task_still_takes_work_block(orch):  # noqa: F811
-    seen = []
-    orch.work.submit = lambda specs, n: seen.append(specs) or []
+def test_flow_directive_without_task_still_takes_work_block(orch, monkeypatch):  # noqa: F811
+    _enable_work_registration(orch, monkeypatch)
 
     async def scenario():
         nxt = await advance(orch, "architect", WORK + "\n<!-- duet: ACCEPT -->")
-        assert nxt is None and seen
+        assert nxt is None
+        _assert_registered(orch)
+
+    asyncio.run(scenario())
+
+
+def test_completed_work_id_can_be_registered_again_with_accepted_receipt(orch, monkeypatch):  # noqa: F811
+    _enable_work_registration(orch, monkeypatch)
+
+    async def scenario():
+        assert await advance(orch, "architect", WORK) is None
+        old = orch.work.items["next-a"]
+        orch.work._touch(old, "merged")
+        assert await advance(orch, "architect", WORK) is None
+        current = orch.work.items["next-a"]
+        assert current is not old and current.status == "queued"
+        assert current.from_turn > old.from_turn
+        receipts = [r for e in orch.events if e.kind == "control_outcome"
+                    for r in e.data.get("receipts", []) if r["action"] == "SUBMIT_WORK"]
+        assert len(receipts) == 2 and all(r["accepted"] for r in receipts)
+        assert json.loads(orch.work.path.read_text())["items"][0]["from_turn"] == current.from_turn
+
+    asyncio.run(scenario())
+
+
+def test_active_work_id_duplicate_keeps_original_and_rejects_receipt(orch, monkeypatch):  # noqa: F811
+    _enable_work_registration(orch, monkeypatch)
+
+    async def scenario():
+        assert await advance(orch, "architect", WORK) is None
+        original = orch.work.items["next-a"]
+        nxt = await advance(orch, "architect", WORK)
+        assert nxt and "이미 진행 중" in nxt[2]
+        assert orch.work.items["next-a"] is original and original.status == "queued"
+        receipts = [r for e in orch.events if e.kind == "control_outcome"
+                    for r in e.data.get("receipts", []) if r["action"] == "SUBMIT_WORK"]
+        assert len(receipts) == 2 and receipts[0]["accepted"] and not receipts[1]["accepted"]
 
     asyncio.run(scenario())
 
